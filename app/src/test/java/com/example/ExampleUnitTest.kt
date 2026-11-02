@@ -48,6 +48,12 @@ class ExampleUnitTest {
         assertFalse(SmartTextHeuristicFilter.isValidGameSentence("m_pWeaponManager"))
         assertFalse(SmartTextHeuristicFilter.isValidGameSentence("levels/normandy/sky.gim"))
 
+        // Corrupted binary garbage from user screenshot must be strictly rejected
+        assertFalse(SmartTextHeuristicFilter.isValidGameSentence("!\uFFFDqG\uFFFDC\uFFFD\uFFFD"))
+        assertFalse(SmartTextHeuristicFilter.isValidGameSentence("ʙ₉X\uFFFD\uFFFD\uFFFD\uFFFD\uFFFDz\uFFFD\uFFFD\uFFFDIQ%\uFFFD\uFFFD"))
+        assertFalse(SmartTextHeuristicFilter.isValidGameSentence("q\uFFFD\uFFFD\uFFFD%\uFFFDU"))
+        assertFalse(SmartTextHeuristicFilter.isValidGameSentence("31C54Fz\uFFFD\uFFFD\uFFFD{(S4\uFFFD/ \"\uFFFD"))
+
         // Meaningful game text (>= 5 chars) must be accepted
         assertTrue(SmartTextHeuristicFilter.isValidGameSentence("Reload!"))
         assertTrue(SmartTextHeuristicFilter.isValidGameSentence("Follow Sgt. Randall to the bunker!"))

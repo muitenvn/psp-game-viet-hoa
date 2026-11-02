@@ -28,7 +28,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
         const val SECTOR_SIZE = 2048
         const val PVD_SECTOR = 16
         private const val BUFFER_CHUNK_SIZE = 64 * 1024 // 64 KB sliding window
-        private const val HEADER_INSPECT_BYTES = 2048
+        private const val HEADER_INSPECT_BYTES = 16 * 1024 // 16 KB decompiler window per file
     }
 
     data class ExtractedStringRecord(
@@ -91,10 +91,9 @@ class Iso9660RandomAccessEngine(private val context: Context) {
     }
 
     /**
-     * REQUIREMENT 1 & 2:
-     * Recursively scans the entire ISO-9660 directory tree (with special focus on `PSP_GAME/USRDIR/`
-     * and all its nested sub-folders), inspects the 4-byte Magic Header of every resource/archive file
-     * (`.dat`, `.pak`, `.bin`, `.txt`, `.str`, `.cfg`), and detects GZIP/ZLIB/LZO/PAK/Pointer Table formats.
+     * Recursively scans the ISO-9660 directory tree and runs [PspReverseDecompilerEngine]
+     * (MIPS Allegrex Disassembler + TOC/strg Unpacker + Shannon Entropy Analyzer) on every file
+     * so AI Tầng 1 can inspect the decompilation report and select the target files directly.
      */
     suspend fun scanIsoDirectoryTree(uri: Uri): IsoScanSummary = withSeekableIso(uri, writable = false) { channel ->
         val totalLength = channel.length()
@@ -130,7 +129,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
             )
         }
 
-        // Inspect 4-byte Magic & Container Header (GZIP, ZLIB, LZO, PAK Offset/Size, Pointer Table)
+        // Run Reverse Engineering Decompiler on each file so AI Tier 1 has full decompilation telemetry
         val enriched = discovered.map { entry ->
             if (!entry.isDirectory && entry.sizeBytes >= 8 && entry.byteOffsetInIso + 8 <= totalLength) {
                 val inspectLen = min(HEADER_INSPECT_BYTES.toLong(), min(entry.sizeBytes, totalLength - entry.byteOffsetInIso)).toInt()
@@ -145,26 +144,37 @@ class Iso9660RandomAccessEngine(private val context: Context) {
                 }.joinToString("")
 
                 val inspection = PspArchiveUnpacker.inspectHeader(headerBuf, entry.sizeBytes)
+                val decompReport = PspReverseDecompilerEngine.analyzeFileWithDecompiler(
+                    path = entry.path,
+                    sampleBuffer = headerBuf,
+                    totalFileSize = entry.sizeBytes
+                )
+
                 entry.copy(
                     headerPreviewHex = hex12,
                     asciiSamplePreview = ascii,
                     magic4BytesHex = inspection.magicHex,
-                    containerFormatLabel = inspection.format.label,
+                    containerFormatLabel = decompReport.binaryFormat,
                     subFileCount = inspection.subFiles.size,
-                    hasPointerTable = inspection.hasPointerTable
+                    hasPointerTable = inspection.hasPointerTable,
+                    isKirkEncrypted = decompReport.isEncryptedKirk,
+                    shannonEntropy = decompReport.shannonEntropy,
+                    mipsXrefCount = decompReport.mipsStringXrefCount,
+                    decompiledAsmPreview = decompReport.decompiledAsmPreview,
+                    decompiledSampleStrings = decompReport.sampleCleanStrings
                 )
             } else {
                 entry
             }
         }
 
-        val usrDirArchives = enriched.count { it.isCandidateArchiveOrScript }
+        val decompiledCount = enriched.count { it.decompiledSampleStrings.isNotEmpty() }
 
         IsoScanSummary(
             volumeId = volumeId,
             isoSizeBytes = totalLength,
             entries = enriched,
-            usrDirArchiveCount = usrDirArchives
+            usrDirArchiveCount = decompiledCount
         )
     }
 
@@ -239,41 +249,40 @@ class Iso9660RandomAccessEngine(private val context: Context) {
     }
 
     /**
-     * REQUIREMENT 1, 2 & 3:
-     * Scans and unpacks ALL candidate archive/resource files inside `PSP_GAME/USRDIR/`
-     * (`.pak`, `.dat`, `.bin`, `.wad`, `.txt`, `.str`, `.cfg`), excluding `EBOOT.BIN`!
-     * Automatically unpacks PAK/WAD TOC sub-files, decompresses GZIP/ZLIB blocks, scans both UTF-8/ASCII
-     * and UTF-16LE strings, and filters every candidate through [SmartTextHeuristicFilter].
+     * Decompiles and extracts strings from the exact files chosen by AI Tier 1 ([aiSelectedFilePaths]),
+     * without hardcoded filename rules.
      */
     suspend fun extractStringsAcrossUsrDirArchives(
         uri: Uri,
         allIsoEntries: List<IsoFileEntry>,
         primaryRecommendedPath: String?,
+        aiSelectedFilePaths: List<String> = emptyList(),
         maxTotalStrings: Int = 600
     ): List<ExtractedStringRecord> = withSeekableIso(uri, writable = false) { channel ->
-        // 1. Collect all candidate files in PSP_GAME/USRDIR/ (strictly excluding EBOOT.BIN / BOOT.BIN)
-        val usrDirCandidates = allIsoEntries
-            .filter { it.isCandidateArchiveOrScript }
-            .sortedWith(
-                compareByDescending<IsoFileEntry> {
-                    it.path.equals(primaryRecommendedPath, ignoreCase = true)
-                }.thenByDescending { scoreUsrDirFileForText(it) }
-            )
+        val selectedPathSet = (aiSelectedFilePaths + listOfNotNull(primaryRecommendedPath))
+            .map { it.lowercase() }
+            .toSet()
 
-        val targetFilesToScan = if (usrDirCandidates.isNotEmpty()) {
-            usrDirCandidates
-        } else {
-            // Only if PSP_GAME/USRDIR has no candidate files at all, scan other non-EBOOT files first
-            allIsoEntries.filter { !it.isDirectory && !it.isSystemExecutable && it.sizeBytes > 64 }
+        // 1. Use the exact files chosen by AI Tier 1 first, then any other files where the decompiler found valid strings
+        val aiMatchedFiles = allIsoEntries.filter { entry ->
+            !entry.isDirectory && !entry.isKirkEncrypted && entry.path.lowercase() in selectedPathSet
+        }
+        val decompiledFallbackFiles = allIsoEntries.filter { entry ->
+            !entry.isDirectory && !entry.isKirkEncrypted && entry.decompiledSampleStrings.isNotEmpty() &&
+                entry.path.lowercase() !in selectedPathSet
+        }
+
+        val targetFilesToDecompile = (aiMatchedFiles + decompiledFallbackFiles).ifEmpty {
+            allIsoEntries.filter { !it.isDirectory && !it.isKirkEncrypted && it.sizeBytes > 64 }
         }
 
         val collected = mutableListOf<ExtractedStringRecord>()
         val seenTexts = HashSet<String>()
 
-        for (fileEntry in targetFilesToScan) {
+        for (fileEntry in targetFilesToDecompile) {
             if (collected.size >= maxTotalStrings) break
             val remainingQuota = maxTotalStrings - collected.size
-            val extractedFromFile = extractFromSingleContainerOrArchive(
+            val extractedFromFile = decompileAndExtractFromSingleContainer(
                 channel = channel,
                 targetEntry = fileEntry,
                 startingIndex = collected.size,
@@ -287,16 +296,17 @@ class Iso9660RandomAccessEngine(private val context: Context) {
     }
 
     /**
-     * Unpacks a single file in `PSP_GAME/USRDIR/` (handling Pointer Tables, PAK/WAD TOC sub-files,
-     * GZIP/ZLIB compressed streams, UTF-16LE tables, and UTF-8/ASCII null-terminated strings).
+     * Runs the Reverse Engineering Decompiler ([PspReverseDecompilerEngine]) + TOC Unpacker ([PspArchiveUnpacker])
+     * on a single container selected by the AI.
      */
-    private fun extractFromSingleContainerOrArchive(
+    private fun decompileAndExtractFromSingleContainer(
         channel: RandomAccessChannel,
         targetEntry: IsoFileEntry,
         startingIndex: Int,
         maxStrings: Int,
         seenTexts: MutableSet<String>
     ): List<ExtractedStringRecord> {
+        if (targetEntry.isKirkEncrypted) return emptyList()
         val startOffset = targetEntry.byteOffsetInIso
         val fileSize = min(targetEntry.sizeBytes, channel.length() - startOffset)
         if (fileSize <= 16 || maxStrings <= 0) return emptyList()
@@ -309,7 +319,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
         val inspection = PspArchiveUnpacker.inspectHeader(headerBuf, fileSize)
         val results = mutableListOf<ExtractedStringRecord>()
 
-        // CASE A: GZIP or ZLIB compressed file -> decompress and scan
+        // CASE A: GZIP or ZLIB compressed file -> decompress and run clean decompiler string scan
         if (inspection.format == PspArchiveUnpacker.ContainerFormat.GZIP_COMPRESSED ||
             inspection.format == PspArchiveUnpacker.ContainerFormat.ZLIB_COMPRESSED
         ) {
@@ -319,10 +329,10 @@ class Iso9660RandomAccessEngine(private val context: Context) {
             channel.readFully(compressedBytes)
             val decompressed = PspArchiveUnpacker.decompressStreamSafe(compressedBytes, inspection.format)
             if (decompressed != null && decompressed.isNotEmpty()) {
-                extractValidStringsFromMemoryBuffer(
+                appendCleanSlicesToResults(
                     buffer = decompressed,
                     sourceFilePath = "${targetEntry.path} [${inspection.format.label}]",
-                    baseIsoOffset = 0L, // Decompressed stream
+                    baseIsoOffset = 0L,
                     startingIndex = startingIndex,
                     maxStrings = maxStrings,
                     seenTexts = seenTexts,
@@ -344,14 +354,13 @@ class Iso9660RandomAccessEngine(private val context: Context) {
                 channel.seek(subAbsOffset)
                 channel.readFully(subBytes)
 
-                // Check if sub-file itself is ZLIB/GZIP compressed
                 val subInspect = PspArchiveUnpacker.inspectHeader(subBytes, subLen.toLong())
                 if (subInspect.format == PspArchiveUnpacker.ContainerFormat.ZLIB_COMPRESSED ||
                     subInspect.format == PspArchiveUnpacker.ContainerFormat.GZIP_COMPRESSED
                 ) {
                     val decomp = PspArchiveUnpacker.decompressStreamSafe(subBytes, subInspect.format)
                     if (decomp != null) {
-                        extractValidStringsFromMemoryBuffer(
+                        appendCleanSlicesToResults(
                             buffer = decomp,
                             sourceFilePath = "${targetEntry.path}#${sub.name}",
                             baseIsoOffset = 0L,
@@ -364,8 +373,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
                     }
                 }
 
-                // Direct string slice or sub-file scan
-                extractValidStringsFromMemoryBuffer(
+                appendCleanSlicesToResults(
                     buffer = subBytes,
                     sourceFilePath = targetEntry.path,
                     baseIsoOffset = subAbsOffset,
@@ -379,7 +387,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
             if (results.isNotEmpty()) return results
         }
 
-        // CASE C: Streaming sliding-window scan across the file (UTF-8/ASCII + UTF-16LE + Embedded ZLIB blocks)
+        // CASE C: Sliding-window MIPS Allegrex XREF Decompiler + Entropy-Filtered String Scanner
         val buffer = ByteArray(BUFFER_CHUNK_SIZE)
         var filePos = 0L
         while (filePos < fileSize && results.size < maxStrings) {
@@ -388,8 +396,27 @@ class Iso9660RandomAccessEngine(private val context: Context) {
             channel.readFully(buffer, 0, toRead)
             val slice = if (toRead == buffer.size) buffer else buffer.copyOf(toRead)
 
-            // 1. Scan direct UTF-8 / ASCII / UTF-16LE strings in this chunk
-            extractValidStringsFromMemoryBuffer(
+            // 1. Run MIPS Allegrex LUI/ADDIU String XREF Disassembler on this chunk
+            val mipsXrefs = PspReverseDecompilerEngine.disassembleMipsAllegrexStringXrefs(slice)
+            for (xref in mipsXrefs) {
+                if (results.size >= maxStrings) break
+                if (seenTexts.add(xref.resolvedString)) {
+                    val utf8Len = xref.resolvedString.toByteArray(StandardCharsets.UTF_8).size + 1
+                    results.add(
+                        ExtractedStringRecord(
+                            stringIndex = startingIndex + results.size,
+                            sourceFilePath = targetEntry.path,
+                            byteOffsetInIso = startOffset + filePos + xref.targetOffsetInBuffer,
+                            allocatedByteLength = utf8Len,
+                            rawText = xref.resolvedString,
+                            hasPointerEntry = true
+                        )
+                    )
+                }
+            }
+
+            // 2. Run Entropy-Filtered Strict UTF-8 / UTF-16LE Decompiler String Scanner
+            appendCleanSlicesToResults(
                 buffer = slice,
                 sourceFilePath = targetEntry.path,
                 baseIsoOffset = startOffset + filePos,
@@ -400,11 +427,8 @@ class Iso9660RandomAccessEngine(private val context: Context) {
                 hasPointerTable = inspection.hasPointerTable
             )
 
-            // 2. Also check for embedded ZLIB streams inside `.pak`, `.wad`, `.dat`, `.bin` containers
-            val lowerName = targetEntry.name.lowercase()
-            if (results.size < maxStrings &&
-                (lowerName.endsWith(".pak") || lowerName.endsWith(".wad") || lowerName.endsWith(".dat") || lowerName.endsWith(".bin"))
-            ) {
+            // 3. Also unpack any embedded ZLIB streams inside the chunk
+            if (results.size < maxStrings) {
                 val embeddedZlibs = PspArchiveUnpacker.scanAndDecompressEmbeddedZlibStreams(
                     rawChunk = slice,
                     baseIsoOffset = startOffset + filePos,
@@ -413,7 +437,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
                 for (zBlock in embeddedZlibs) {
                     if (results.size >= maxStrings) break
                     val decomp = zBlock.decompressedBytes ?: continue
-                    extractValidStringsFromMemoryBuffer(
+                    appendCleanSlicesToResults(
                         buffer = decomp,
                         sourceFilePath = "${targetEntry.path}#${zBlock.name}",
                         baseIsoOffset = 0L,
@@ -431,13 +455,7 @@ class Iso9660RandomAccessEngine(private val context: Context) {
         return results
     }
 
-    /**
-     * Scans a byte array for both:
-     * 1) Null-terminated UTF-8 / ASCII sentences (`0x00`), AND
-     * 2) Null-terminated UTF-16LE sentences (`0x00 0x00`, used in Western PSP games like Call of Duty),
-     * filtering every candidate through [SmartTextHeuristicFilter.isValidGameSentence].
-     */
-    private fun extractValidStringsFromMemoryBuffer(
+    private fun appendCleanSlicesToResults(
         buffer: ByteArray,
         sourceFilePath: String,
         baseIsoOffset: Long,
@@ -447,136 +465,25 @@ class Iso9660RandomAccessEngine(private val context: Context) {
         outList: MutableList<ExtractedStringRecord>,
         hasPointerTable: Boolean = false
     ) {
-        if (buffer.isEmpty() || maxStrings <= 0) return
-
-        // Pass 1: Check if buffer is UTF-16LE encoded
-        if (PspArchiveUnpacker.looksLikeUtf16LeStream(buffer)) {
-            extractUtf16LeStrings(
-                buffer = buffer,
-                sourceFilePath = sourceFilePath,
-                baseIsoOffset = baseIsoOffset,
-                startingIndex = startingIndex,
-                maxStrings = maxStrings,
-                seenTexts = seenTexts,
-                outList = outList
+        val cleanSlices = PspReverseDecompilerEngine.scanCleanStringsFromChunk(
+            buffer = buffer,
+            maxStrings = maxStrings,
+            seen = seenTexts
+        )
+        for (slice in cleanSlices) {
+            if (outList.size >= maxStrings) break
+            val absOffset = if (baseIsoOffset > 0L) baseIsoOffset + slice.offsetInBuffer else 0L
+            outList.add(
+                ExtractedStringRecord(
+                    stringIndex = startingIndex + outList.size,
+                    sourceFilePath = sourceFilePath,
+                    byteOffsetInIso = absOffset,
+                    allocatedByteLength = slice.allocatedLength,
+                    rawText = slice.text,
+                    hasPointerEntry = hasPointerTable
+                )
             )
-            if (outList.size >= maxStrings) return
         }
-
-        // Pass 2: Null-terminated UTF-8 / ASCII scan (minimum 5 chars per Requirement 3)
-        val currentBytes = ByteArrayOutputStream(256)
-        var currentStartIndex = -1
-
-        var i = 0
-        while (i < buffer.size && outList.size < maxStrings) {
-            val b = buffer[i].toInt() and 0xFF
-            val isPrintableOrUtf8 = (b in 0x20..0x7E) || b == 0x0A || b == 0x0D || b == 0x09 ||
-                (b in 0xC2..0xF4) || (b in 0x80..0xBF && currentBytes.size() > 0)
-
-            if (isPrintableOrUtf8) {
-                if (currentStartIndex < 0) currentStartIndex = i
-                currentBytes.write(b)
-            } else if (b == 0x00) {
-                if (currentBytes.size() >= 5 && currentStartIndex >= 0) {
-                    val rawBytes = currentBytes.toByteArray()
-                    val candidate = String(rawBytes, StandardCharsets.UTF_8).trim()
-                    if (SmartTextHeuristicFilter.isValidGameSentence(candidate) && seenTexts.add(candidate)) {
-                        var paddingNulls = 1
-                        var lookahead = i + 1
-                        while (lookahead < buffer.size && buffer[lookahead].toInt() == 0 && paddingNulls < 64) {
-                            paddingNulls++
-                            lookahead++
-                        }
-                        val absOffset = if (baseIsoOffset > 0L) baseIsoOffset + currentStartIndex else 0L
-                        outList.add(
-                            ExtractedStringRecord(
-                                stringIndex = startingIndex + outList.size,
-                                sourceFilePath = sourceFilePath,
-                                byteOffsetInIso = absOffset,
-                                allocatedByteLength = rawBytes.size + paddingNulls,
-                                rawText = candidate,
-                                hasPointerEntry = hasPointerTable
-                            )
-                        )
-                    }
-                }
-                currentBytes.reset()
-                currentStartIndex = -1
-            } else {
-                currentBytes.reset()
-                currentStartIndex = -1
-            }
-            i++
-        }
-    }
-
-    private fun extractUtf16LeStrings(
-        buffer: ByteArray,
-        sourceFilePath: String,
-        baseIsoOffset: Long,
-        startingIndex: Int,
-        maxStrings: Int,
-        seenTexts: MutableSet<String>,
-        outList: MutableList<ExtractedStringRecord>
-    ) {
-        val sb = StringBuilder()
-        var startByteIndex = -1
-        var i = 0
-        while (i + 1 < buffer.size && outList.size < maxStrings) {
-            val lo = buffer[i].toInt() and 0xFF
-            val hi = buffer[i + 1].toInt() and 0xFF
-            val codeUnit = (hi shl 8) or lo
-
-            if (codeUnit == 0x0000) {
-                if (sb.length >= 5 && startByteIndex >= 0) {
-                    val candidate = sb.toString().trim()
-                    if (SmartTextHeuristicFilter.isValidGameSentence(candidate) && seenTexts.add(candidate)) {
-                        val byteLen = (i - startByteIndex) + 2
-                        val absOffset = if (baseIsoOffset > 0L) baseIsoOffset + startByteIndex else 0L
-                        outList.add(
-                            ExtractedStringRecord(
-                                stringIndex = startingIndex + outList.size,
-                                sourceFilePath = sourceFilePath,
-                                byteOffsetInIso = absOffset,
-                                allocatedByteLength = byteLen,
-                                rawText = candidate
-                            )
-                        )
-                    }
-                }
-                sb.setLength(0)
-                startByteIndex = -1
-            } else if (codeUnit in 0x0020..0x007E || codeUnit == 0x000A || codeUnit == 0x000D || codeUnit in 0x00A0..0x2FFF) {
-                if (startByteIndex < 0) startByteIndex = i
-                sb.append(codeUnit.toChar())
-            } else {
-                sb.setLength(0)
-                startByteIndex = -1
-            }
-            i += 2
-        }
-    }
-
-    private fun scoreUsrDirFileForText(entry: IsoFileEntry): Int {
-        if (!entry.isInsideUsrDir || entry.isSystemExecutable) return 0
-        val lower = entry.path.lowercase()
-        var score = 50
-        if (lower.contains("script") || lower.contains("text") || lower.contains("msg") ||
-            lower.contains("mes") || lower.contains("dlg") || lower.contains("str") ||
-            lower.contains("loc") || lower.contains("eng") || lower.contains("mission") ||
-            lower.contains("cod") || lower.contains("pak") || lower.contains("wad")
-        ) {
-            score += 40
-        }
-        if (lower.endsWith(".pak") || lower.endsWith(".dat") || lower.endsWith(".bin") ||
-            lower.endsWith(".wad") || lower.endsWith(".str") || lower.endsWith(".txt") || lower.endsWith(".cfg")
-        ) {
-            score += 25
-        }
-        if (entry.hasPointerTable || entry.subFileCount > 0) {
-            score += 20
-        }
-        return score
     }
 
     /**

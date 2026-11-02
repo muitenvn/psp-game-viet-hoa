@@ -56,12 +56,15 @@ class TwoTierTranslationManager(
             .build()
     }
 
-    // Structured JSON Schema for Tier 1 Task 1 (Language File Discovery)
+    // Structured JSON Schema for Tier 1 Task 1 (AI-Driven File Selection from Decompiler Report)
     private val scoutFileSchema by lazy {
         Schema.obj(
             properties = mapOf(
-                "primaryTargetFile" to Schema.string(description = "Full path to the primary script/language file in PSP_GAME/USRDIR"),
-                "analysisSummary" to Schema.string(description = "Brief technical explanation of the ROM's localization structure"),
+                "primaryTargetFile" to Schema.string(description = "Full path to the primary script/language file chosen by AI"),
+                "selectedFilePaths" to Schema.array(
+                    items = Schema.string(description = "All file paths in the ISO selected by AI for decompilation and translation")
+                ),
+                "analysisSummary" to Schema.string(description = "AI technical explanation based on the Reverse Engineering Decompiler report"),
                 "candidateFiles" to Schema.array(
                     items = Schema.obj(
                         properties = mapOf(
@@ -400,8 +403,15 @@ class TwoTierTranslationManager(
             // Restore {0}, {1}, {2} placeholders back to original PSP system codes (%s, <color=01>, SYS_BTN_X)
             val restoredBatchPairs = batchEntries.map { entry ->
                 val placeholderMap = MaskedStringPayload.placeholderMapFromJson(entry.placeholderMapJson)
-                val rawViMasked = translatedMaskedMap[entry.stringIndex]
-                    ?: fallbackLocalMatureTranslate(entry.maskedText, rules)
+                var rawViMasked = translatedMaskedMap[entry.stringIndex]?.trim()
+
+                // If AI batch missed this ID or returned the exact untranslated source text, translate it individually
+                if (rawViMasked.isNullOrBlank() || rawViMasked.equals(entry.maskedText.trim(), ignoreCase = true)) {
+                    rawViMasked = translateSingleSentenceViaGoogle(entry.maskedText)
+                        ?.takeIf { it.isNotBlank() && !it.equals(entry.maskedText.trim(), ignoreCase = true) }
+                        ?: fallbackLocalMatureTranslate(entry.maskedText, rules)
+                }
+
                 val restoredVi = SystemTagMasker.restoreSystemTags(rawViMasked, placeholderMap)
                 entry.stringIndex to restoredVi
             }
@@ -532,24 +542,27 @@ class TwoTierTranslationManager(
     }
 
     /**
-     * Fallback translator using Google Translate endpoint while strictly preserving `{0}`, `{1}` tags
-     * and applying Tier 1's glossary & mature military/RPG terminology post-processing.
+     * High-reliability batch translator using POST (`application/x-www-form-urlencoded`) and newline-safe
+     * token wrapping so `{0}`, `{1}` tags and multi-line PSP dialogues never misalign or hit GET URI limits.
      */
     private suspend fun translateBatchViaGoogleEndpoint(
         batchEntries: List<TranslationEntryEntity>
     ): Map<Int, String> = withContext(Dispatchers.IO) {
         val results = mutableMapOf<Int, String>()
-        // Group in sub-chunks of 25 strings separated by newline to minimize HTTP calls
-        val subChunks = batchEntries.chunked(25)
+        val subChunks = batchEntries.chunked(12)
         for (chunk in subChunks) {
             try {
-                val joined = chunk.joinToString("\n") { it.maskedText }
-                val encoded = URLEncoder.encode(joined, "UTF-8")
-                val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=vi&dt=t&q=$encoded"
+                // Sanitize internal newlines so each entry occupies strictly one line in the batch
+                val sanitizedLines = chunk.map { entry ->
+                    entry.maskedText.replace("\r\n", " [[NL]] ").replace("\n", " [[NL]] ")
+                }
+                val joined = sanitizedLines.joinToString("\n")
+                val formBody = "q=" + URLEncoder.encode(joined, "UTF-8")
+                val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=vi&dt=t"
                 val req = Request.Builder()
                     .url(url)
                     .header("User-Agent", "Mozilla/5.0")
-                    .get()
+                    .post(formBody.toRequestBody("application/x-www-form-urlencoded; charset=utf-8".toMediaType()))
                     .build()
 
                 httpClient.newCall(req).execute().use { resp ->
@@ -567,19 +580,62 @@ class TwoTierTranslationManager(
                             }
                         }
                         val translatedLines = sb.toString().split("\n")
-                        for ((idx, entry) in chunk.withIndex()) {
-                            val lineVi = translatedLines.getOrNull(idx)?.trim()
-                            if (!lineVi.isNullOrBlank()) {
-                                results[entry.stringIndex] = refineMatureVietnameseTone(lineVi)
+                        if (translatedLines.size == chunk.size) {
+                            for ((idx, entry) in chunk.withIndex()) {
+                                val lineVi = translatedLines[idx]
+                                    .replace("[[NL]]", "\n")
+                                    .replace("[[nl]]", "\n")
+                                    .trim()
+                                if (lineVi.isNotBlank()) {
+                                    results[entry.stringIndex] = refineMatureVietnameseTone(lineVi)
+                                }
                             }
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Google Translate fallback sub-chunk failed: ${e.message}")
+                Log.w(TAG, "Google Translate POST sub-chunk failed: ${e.message}")
+            }
+
+            // For any entry in the chunk that wasn't mapped or aligned, translate individually
+            for (entry in chunk) {
+                if (!results.containsKey(entry.stringIndex)) {
+                    val singleVi = translateSingleSentenceViaGoogle(entry.maskedText)
+                    if (!singleVi.isNullOrBlank()) {
+                        results[entry.stringIndex] = refineMatureVietnameseTone(singleVi)
+                    }
+                }
             }
         }
         results
+    }
+
+    private fun translateSingleSentenceViaGoogle(maskedText: String): String? {
+        return try {
+            val encoded = URLEncoder.encode(maskedText, "UTF-8")
+            val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=vi&dt=t&q=$encoded"
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string().orEmpty()
+                val outerArray = JSONArray(body)
+                val sentencesArray = outerArray.optJSONArray(0) ?: return null
+                val sb = StringBuilder()
+                for (i in 0 until sentencesArray.length()) {
+                    val seg = sentencesArray.optJSONArray(i)
+                    if (seg != null && seg.length() > 0) {
+                        sb.append(seg.optString(0))
+                    }
+                }
+                sb.toString().trim().takeIf { it.isNotBlank() }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun parseScoutFileResult(
@@ -591,78 +647,98 @@ class TwoTierTranslationManager(
         val primary = obj.optString("primaryTargetFile")
         val summary = obj.optString(
             "analysisSummary",
-            "Đã phân tích cấu trúc ISO-9660 và xác định file chứa chuỗi kịch bản trong PSP_GAME/USRDIR."
+            "AI Tầng 1 đã phân tích báo cáo Dịch Mã Ngược (MIPS Allegrex + TOC Decompiler) và chọn các file ngôn ngữ."
         )
+
+        val aiSelectedPaths = mutableListOf<String>()
+        obj.optJSONArray("selectedFilePaths")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val p = arr.optString(i).trim()
+                if (p.isNotBlank()) aiSelectedPaths.add(p)
+            }
+        }
+
         val candidates = mutableListOf<CandidateScriptFile>()
         obj.optJSONArray("candidateFiles")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val item = arr.optJSONObject(i) ?: continue
-                candidates.add(
-                    CandidateScriptFile(
-                        path = item.optString("path"),
-                        confidenceScore = item.optInt("confidenceScore", 85),
-                        estimatedEncoding = item.optString("estimatedEncoding", "UTF-8"),
-                        reason = item.optString("reason", "Chứa chuỗi thoại và mã điều khiển PSP")
+                val path = item.optString("path").trim()
+                if (path.isNotBlank()) {
+                    candidates.add(
+                        CandidateScriptFile(
+                            path = path,
+                            confidenceScore = item.optInt("confidenceScore", 90),
+                            estimatedEncoding = item.optString("estimatedEncoding", "UTF-8"),
+                            reason = item.optString("reason", "AI chọn từ báo cáo Dịch Mã Ngược")
+                        )
                     )
-                )
+                    if (path !in aiSelectedPaths) {
+                        aiSelectedPaths.add(path)
+                    }
+                }
             }
         }
-        val fallbackScout = heuristicFallbackScout(isoEntries)
+
+        val decompilerFallback = heuristicFallbackScout(isoEntries)
         val matchedPrimaryEntry = isoEntries.firstOrNull {
-            it.path.equals(primary, ignoreCase = true) && !it.isSystemExecutable
+            it.path.equals(primary, ignoreCase = true) && !it.isKirkEncrypted
         }
-        val resolvedPrimary = matchedPrimaryEntry?.path ?: fallbackScout.primaryTargetFile
+        val resolvedPrimary = matchedPrimaryEntry?.path
+            ?: aiSelectedPaths.firstOrNull { sel -> isoEntries.any { it.path.equals(sel, ignoreCase = true) } }
+            ?: decompilerFallback.primaryTargetFile
+
+        val finalSelectedPaths = if (aiSelectedPaths.isNotEmpty()) {
+            aiSelectedPaths
+        } else {
+            decompilerFallback.selectedFilePaths
+        }
+
         return ScoutFileAnalysisResult(
             primaryTargetFile = resolvedPrimary,
-            candidateFiles = if (candidates.isNotEmpty()) {
-                candidates.filterNot { it.path.uppercase().endsWith("EBOOT.BIN") }.ifEmpty { fallbackScout.candidateFiles }
-            } else {
-                fallbackScout.candidateFiles
-            },
+            selectedFilePaths = finalSelectedPaths,
+            candidateFiles = if (candidates.isNotEmpty()) candidates else decompilerFallback.candidateFiles,
             analysisSummary = summary
         )
     }
 
+    /**
+     * Decompiler-driven file ranking (used only for initial preview before AI Tier 1 runs or if offline).
+     * Ranks files strictly by the Reverse Engineering Decompiler output ([IsoFileEntry.decompiledSampleStrings],
+     * [IsoFileEntry.mipsXrefCount], and [IsoFileEntry.subFileCount]) — ZERO hardcoded filename rules!
+     */
     fun heuristicFallbackScout(isoEntries: List<IsoFileEntry>): ScoutFileAnalysisResult {
-        // Strictly prioritize files inside PSP_GAME/USRDIR/ and exclude EBOOT.BIN / BOOT.BIN / .PRX
-        val usrDirFiles = isoEntries.filter { !it.isDirectory && it.isInsideUsrDir && !it.isSystemExecutable && it.sizeBytes > 32 }
-        val poolToScore = if (usrDirFiles.isNotEmpty()) {
-            usrDirFiles
-        } else {
-            isoEntries.filter { !it.isDirectory && !it.isSystemExecutable && it.sizeBytes > 32 }
+        val decompiledCandidates = isoEntries
+            .filter { !it.isDirectory && !it.isKirkEncrypted && it.decompiledSampleStrings.isNotEmpty() }
+            .sortedByDescending { entry ->
+                (entry.decompiledSampleStrings.size * 25) +
+                    (entry.mipsXrefCount * 10) +
+                    (entry.subFileCount * 5)
+            }
+
+        val pool = decompiledCandidates.ifEmpty {
+            isoEntries.filter { !it.isDirectory && !it.isKirkEncrypted && it.sizeBytes > 32 }
         }
 
-        val scored = poolToScore.map { entry ->
-            val lower = entry.path.lowercase()
-            var score = when {
-                lower.contains("usrdir") && (lower.contains("script") || lower.contains("mes") || lower.contains("msg") || lower.contains("text") || lower.contains("str") || lower.contains("loc")) -> 96
-                lower.contains("usrdir") && (lower.endsWith(".pak") || lower.endsWith(".wad") || lower.endsWith(".dat") || lower.endsWith(".bin") || lower.endsWith(".str") || lower.endsWith(".txt")) -> 88
-                entry.isCandidateArchiveOrScript -> 82
-                else -> 25
-            }
-            if (entry.hasPointerTable || entry.subFileCount > 0) {
-                score = (score + 4).coerceAtMost(99)
-            }
-            val reason = when {
-                entry.subFileCount > 0 -> "Archive ${entry.containerFormatLabel} (${entry.subFileCount} sub-files / TOC) trong PSP_GAME/USRDIR."
-                entry.hasPointerTable -> "Bảng Pointer Table (${entry.containerFormatLabel}, Magic: ${entry.magic4BytesHex}) chứa chuỗi thoại & nhiệm vụ."
-                score >= 85 -> "File tài nguyên / kịch bản trong PSP_GAME/USRDIR (${entry.containerFormatLabel}, Magic: ${entry.magic4BytesHex})."
-                else -> "File dữ liệu trong USRDIR."
-            }
+        val candidateList = pool.map { entry ->
+            val confidence = (60 + entry.decompiledSampleStrings.size * 6 + entry.mipsXrefCount * 4)
+                .coerceIn(50, 99)
+            val samplePreview = entry.decompiledSampleStrings.firstOrNull()?.take(45) ?: ""
             CandidateScriptFile(
                 path = entry.path,
-                confidenceScore = score,
+                confidenceScore = confidence,
                 estimatedEncoding = entry.containerFormatLabel,
-                reason = reason
+                reason = "Dịch mã ngược tìm thấy ${entry.decompiledSampleStrings.size} chuỗi mẫu, ${entry.mipsXrefCount} lệnh MIPS LUI/ADDIU, Entropy ${"%.2f".format(entry.shannonEntropy)} bits/B" +
+                    if (samplePreview.isNotBlank()) " (Mẫu: \"$samplePreview\")" else ""
             )
-        }.sortedByDescending { it.confidenceScore }
+        }
 
-        val best = scored.firstOrNull()?.path ?: "PSP_GAME/USRDIR/script_en.bin"
-        val archiveCount = usrDirFiles.count { it.isCandidateArchiveOrScript }
+        val best = candidateList.firstOrNull()?.path ?: "PSP_GAME/USRDIR/script_en.bin"
+        val selectedPaths = candidateList.map { it.path }
         return ScoutFileAnalysisResult(
             primaryTargetFile = best,
-            candidateFiles = scored.take(8),
-            analysisSummary = "Đã quét đệ quy PSP_GAME/USRDIR (${usrDirFiles.size} tệp, $archiveCount archive .PAK/.DAT/.BIN/.WAD, tự động loại bỏ EBOOT.BIN) và chọn '$best' làm container chính."
+            selectedFilePaths = selectedPaths,
+            candidateFiles = candidateList.take(8),
+            analysisSummary = "Bộ Dịch Mã Ngược (MIPS Allegrex + TOC Decompiler) đã giải mã ${decompiledCandidates.size} file có chuỗi hội thoại hợp lệ. AI Tầng 1 sẽ chọn trực tiếp danh sách file từ báo cáo này."
         )
     }
 

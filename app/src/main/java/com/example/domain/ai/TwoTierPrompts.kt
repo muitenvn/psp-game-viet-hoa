@@ -13,24 +13,23 @@ object TwoTierPrompts {
      * Scout & Language File Discovery inside PSP_GAME/USRDIR & SYSDIR.
      */
     const val TIER1_SCOUT_FILE_DISCOVERY_SYSTEM_PROMPT = """
-Bạn là Chuyên gia Reverse Engineering ROM PlayStation Portable (PSP ISO-9660) và Kỹ sư Dịch thuật Game (Tầng 1 - AI Trinh sát).
+Bạn là Chuyên gia Reverse Engineering ROM PlayStation Portable (PSP ISO-9660) và Kỹ sư Dịch Mã Ngược (MIPS Allegrex Decompiler & Archive Unpacker - AI Tầng 1).
 
-NHIỆM VỤ CỦA BẠN (NHIỆM VỤ 1 - DÒ TÌM FILE NGÔN NGỮ):
-Dựa trên danh sách cây thư mục của file `.iso` (bao gồm đường dẫn trong `PSP_GAME/USRDIR` hoặc `PSP_GAME/SYSDIR`, kích thước byte, LBA sector, 12 byte magic header hex và chuỗi ASCII preview), hãy chỉ điểm chính xác những file có khả năng cao nhất chứa kịch bản thoại (dialogue script) hoặc bảng chuỗi ngôn ngữ (string table).
+NHIỆM VỤ CỦA BẠN (NHIỆM VỤ 1 - AI TỰ ĐỘNG CHỌN FILE DỰA TRÊN BÁO CÁO DỊCH MÃ NGƯỢC):
+Ứng dụng đã chạy bộ công cụ Dịch Mã Ngược (MIPS R4000/Allegrex Disassembler + TOC/strg Unpacker + Shannon Entropy Analyzer) trên toàn bộ các file trong `.iso`.
+Bạn nhận được báo cáo dịch mã ngược của từng file gồm:
+- Đường dẫn file (`Path`), kích thước (`Size`), mã Magic Header (`Magic`), định dạng nhị phân (`Format`), độ hỗn loạn byte (`ShannonEntropy`).
+- Số lượng tham chiếu chuỗi từ lệnh hợp ngữ MIPS (`LUI` + `ADDIU`/`ORI` XREFs) và số lượng mục trong Pointer Table / TOC.
+- Các dòng lệnh hợp ngữ MIPS dịch ngược (`DecompiledASM`) và các chuỗi văn bản mẫu thực tế đã giải mã (`SampleDecodedStrings`).
 
-QUY TẮC PHÂN TÍCH KỸ THUẬT PSP:
-1. Ưu tiên cao nhất các file nằm trong `PSP_GAME/USRDIR/` có tên hoặc đuôi gợi ý dữ liệu ngôn ngữ/kịch bản:
-   - Tên thường gặp: `script*.bin`, `mes*.pak`, `text*.dat`, `msg*.bin`, `scenario*.dat`, `talk*.bin`, `ev_*.bin`, `string*.tbl`, `ui_*.dat`.
-   - Kiểm tra `asciiSamplePreview`: Nếu có xuất hiện các từ tiếng Anh/Nhật đọc được, thẻ `<color=...>`, biến `%s`, `%d`, hoặc mã nút `SYS_BTN_...` thì độ tin cậy (confidenceScore) là 90-100%.
-2. Loại trừ các file tài nguyên đa phương tiện/đồ họa/âm thanh:
-   - Bỏ qua `.at3`, `.bgm`, `.afs`, `.vag` (âm thanh), `.pmf`, `.pam` (video), `.gim`, `.tm2`, `.gim` (texture ảnh), `.prx` (thư viện kernel module).
-3. Chỉ chọn `PSP_GAME/SYSDIR/EBOOT.BIN` làm phương án dự phòng nếu trong `USRDIR` không có file script/text riêng biệt hoặc khi cần dịch chuỗi hệ thống hardcode.
-
-ĐỊNH DẠNG ĐẦU RA:
-Trả về duy nhất JSON hợp lệ theo đúng Schema gồm:
-- `primaryTargetFile`: Đường dẫn đầy đủ của file ngôn ngữ chính cần trích xuất (ví dụ: `PSP_GAME/USRDIR/script_en.bin`).
-- `candidateFiles`: Danh sách các file ứng viên kèm `path`, `confidenceScore` (0-100), `estimatedEncoding` (`UTF-8`, `Shift-JIS`, hoặc `ASCII`), và `reason` giải thích ngắn gọn.
-- `analysisSummary`: Nhận xét kỹ thuật ngắn gọn về cấu trúc lưu trữ ngôn ngữ của ROM PSP này.
+QUY TẮC CHỌN FILE CỦA AI:
+1. Bạn có toàn quyền quyết định chọn 1 hoặc nhiều file (`selectedFilePaths`) chứa kịch bản hội thoại, nhiệm vụ, phụ đề, menu thực sự của game dựa trên kết quả dịch mã ngược (`SampleDecodedStrings` và `DecompiledASM`).
+2. Loại bỏ các file mã hóa phần cứng Kirk (`~PSP`), các file âm thanh/texture nén có Entropy cao mà không có chuỗi hội thoại thật, hoặc file chỉ chứa tên hàm SDK/compiler (`sceKernel*`, `heap_alloc`).
+3. Trả về JSON hợp lệ theo đúng Schema gồm:
+   - `primaryTargetFile`: Đường dẫn file chứa nhiều hội thoại/kịch bản quan trọng nhất.
+   - `selectedFilePaths`: Mảng danh sách TẤT CẢ các đường dẫn file mà bạn (AI) chọn để trích xuất và dịch thuật.
+   - `candidateFiles`: Danh sách chi tiết từng file được chọn kèm `path`, `confidenceScore` (0-100), `estimatedEncoding`, và `reason` (nêu rõ kết quả dịch mã ngược vì sao bạn chọn file này).
+   - `analysisSummary`: Nhận xét kỹ thuật của AI về cấu trúc nhị phân & kết quả dịch mã ngược của ROM này.
 """
 
     /**
@@ -100,11 +99,17 @@ Nhiệm vụ: Dịch mảng JSON gồm 100-150 câu thoại game sang tiếng Vi
     fun buildTier1ScoutUserPrompt(volumeId: String, entries: List<IsoFileEntry>): String {
         val sb = StringBuilder()
         sb.appendLine("Volume ID: $volumeId")
-        sb.appendLine("Danh sách file trong ISO (PSP_GAME):")
+        sb.appendLine("Báo cáo Dịch Mã Ngược (MIPS Allegrex Decompiler + TOC Unpacker) trên các file trong ISO:")
         entries.filter { !it.isDirectory }.forEach { entry ->
             sb.appendLine(
-                "- Path: ${entry.path} | Size: ${entry.sizeBytes} bytes | LBA: ${entry.lbaSector} | Hex: [${entry.headerPreviewHex}] | ASCII: \"${entry.asciiSamplePreview}\""
+                "- Path: ${entry.path} | Size: ${entry.sizeBytes}B | LBA: ${entry.lbaSector} | Magic: [${entry.magic4BytesHex}] | Format: ${entry.containerFormatLabel} | Entropy: ${"%.2f".format(entry.shannonEntropy)} bits/B | MIPS_String_XREFs: ${entry.mipsXrefCount} | TOC_SubFiles: ${entry.subFileCount} | KirkEncrypted: ${entry.isKirkEncrypted}"
             )
+            if (entry.decompiledAsmPreview.isNotEmpty()) {
+                sb.appendLine("  + DecompiledASM: ${entry.decompiledAsmPreview.joinToString(" || ")}")
+            }
+            if (entry.decompiledSampleStrings.isNotEmpty()) {
+                sb.appendLine("  + SampleDecodedStrings: ${entry.decompiledSampleStrings.joinToString(" | ") { "\"${it.take(60)}\"" }}")
+            }
         }
         return sb.toString()
     }

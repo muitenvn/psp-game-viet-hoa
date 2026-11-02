@@ -3,12 +3,13 @@ package com.example.domain.iso
 import java.util.Locale
 
 /**
- * Intelligent Heuristic Filter for PSP ROM String Extraction (Requirement 3).
+ * Intelligent Heuristic Filter for Decompiled PSP ROM String Extraction.
  *
  * Ensures that only genuine human-readable dialogue, mission briefings, objectives, and UI messages
- * (minimum 10 characters, null-terminated `0x00`) are accepted, while aggressively rejecting
- * C/C++ compiler symbols, SDK imports, engine variables, and button macros (e.g. `SYS_BTN_X`,
- * `activision`, `heap_alloc`, `sceKernel*`).
+ * (minimum 5 characters, null-terminated `0x00`) are accepted, while 100% rejecting:
+ * - Replacement characters (`\uFFFD` ``) or corrupted multi-byte sequences (`ʙ₉XzIQ%`, `!qGC`).
+ * - Random binary/cipher/hex noise (`31C54Fz{(S4/ "`).
+ * - C/C++ compiler symbols, SDK imports, engine variables, and button macros (`SYS_BTN_X`, `activision`, `heap_alloc`, `sceKernel*`).
  */
 object SmartTextHeuristicFilter {
 
@@ -91,19 +92,34 @@ object SmartTextHeuristicFilter {
     // Regex matching camelCase or snake_case function/variable names without spaces (e.g. initWeaponMgr, m_pPlayer)
     private val CODE_SYMBOL_REGEX = Regex("""^[a-zA-Z_][a-zA-Z0-9_]*$""")
 
-    // Regex matching camelCase transitions like "getPlayerHealth" or " m_pHud"
+    // Regex matching camelCase transitions like "getPlayerHealth" or "m_pHud"
     private val CAMEL_CASE_TRANSITION_REGEX = Regex("""[a-z][A-Z0-9]{2,}|[a-z]+[A-Z][a-z]+""")
 
     // Regex matching printf-only debug format strings like "%s: %d (%08x)"
     private val DEBUG_FORMAT_ONLY_REGEX = Regex("""^[\s%0-9dxXsfp.:,\-\[\]()/\\]+$""")
 
+    // Regex matching random digit+letter mixed tokens like "31C54Fz" or "a9B2x"
+    private val RANDOM_ALPHANUM_TOKEN_REGEX = Regex(""".*[0-9]+[a-zA-Z]+[0-9]+.*|.*[a-zA-Z]+[0-9]+[a-zA-Z]+.*""")
+
     private const val VOWELS = "aeiouyAEIOUYáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵ"
 
     /**
      * Evaluates whether a null-terminated candidate string is valid human-readable game text
-     * (length >= 5 characters, natural language words/vowels, not an engine/compiler symbol).
+     * (length >= 5 characters, natural language words/vowels, zero replacement characters `\uFFFD`).
      */
     fun isValidGameSentence(rawCandidate: String): Boolean {
+        // 0. Zero tolerance for UTF-8 replacement character (\uFFFD ``) or control chars
+        if (rawCandidate.indexOf('\uFFFD') >= 0) return false
+        for (c in rawCandidate) {
+            val code = c.code
+            if (code < 0x20 && c != '\n' && c != '\r' && c != '\t') return false
+            if (code in 0x7F..0x9F) return false
+            // Reject IPA phonetic extensions, subscripts/superscripts, box drawing, private use, specials (e.g. ʙ, ₉, )
+            if (code in 0x0250..0x1DFF) return false
+            if (code in 0x2070..0x2FFF && code !in 0x2013..0x2026) return false
+            if (code >= 0xE000) return false
+        }
+
         val trimmed = rawCandidate.trim()
 
         // 1. Minimum length: at least 5 contiguous characters
@@ -153,51 +169,76 @@ object SmartTextHeuristicFilter {
         // 7. Check character distribution (must look like a natural language phrase/sentence)
         var letterCount = 0
         var vowelCount = 0
+        var consonantCount = 0
         var digitCount = 0
         var spaceCount = 0
-        var cjkOrHighUnicodeCount = 0
+        var genuineCjkCount = 0
+        var punctuationCount = 0
         var weirdSymbolCount = 0
 
         for (ch in strippedCore) {
+            val code = ch.code
             when {
-                ch.code > 0x024F -> {
-                    cjkOrHighUnicodeCount++
+                // Genuine Hiragana, Katakana, CJK Unified Ideographs, Hangul Syllables
+                code in 0x3040..0x30FF || code in 0x4E00..0x9FFF || code in 0xAC00..0xD7AF -> {
+                    genuineCjkCount++
                     letterCount++
                 }
-                ch.isLetter() -> {
+                // Standard ASCII letters or Vietnamese/Latin accented letters
+                ch in 'a'..'z' || ch in 'A'..'Z' || code in 0x00C0..0x024F || code in 0x1E00..0x1EFF -> {
                     letterCount++
-                    if (VOWELS.indexOf(ch) >= 0) vowelCount++
+                    if (VOWELS.indexOf(ch) >= 0) vowelCount++ else consonantCount++
                 }
                 ch.isDigit() -> digitCount++
                 ch.isWhitespace() -> spaceCount++
-                ch in ".,!?'\":;-()[]{}/%&+" -> Unit
+                ch in ".,!?'\":;-()[]{}/%&+" -> punctuationCount++
                 else -> weirdSymbolCount++
             }
         }
 
-        // Reject if too many non-punctuation symbols (binary garbage masquerading as ASCII)
-        if (weirdSymbolCount > 2 || weirdSymbolCount.toFloat() / strippedCore.length > 0.08f) {
-            return false
-        }
+        // Zero tolerance for weird non-punctuation symbols in binary scans
+        if (weirdSymbolCount > 0) return false
 
-        // For Latin/English/European text, require natural word spacing or punctuation and vowels
-        if (cjkOrHighUnicodeCount == 0) {
+        // Reject if punctuation + digits outnumber letters (e.g. "31C54Fz{(S4/ \"")
+        if (punctuationCount + digitCount >= letterCount) return false
+        if (letterCount.toFloat() / strippedCore.length.toFloat() < 0.60f) return false
+
+        val isPredominantlyCjk = genuineCjkCount >= strippedCore.length * 0.4f
+
+        if (!isPredominantlyCjk) {
             if (letterCount < 4) return false
+            if (vowelCount == 0 || consonantCount == 0) return false
             val vowelRatio = vowelCount.toFloat() / letterCount.toFloat()
-            if (vowelRatio < 0.15f || vowelRatio > 0.80f) return false
-            if (digitCount > letterCount) return false
+            if (vowelRatio < 0.18f || vowelRatio > 0.75f) return false
+            if (digitCount > letterCount / 2) return false
 
-            // Single-word strings without spaces are only valid if they end with dialogue punctuation (e.g. "Reload!")
-            // Otherwise require at least 2 words separated by whitespace
+            // Single-word strings without spaces are only valid if they are clean Titlecase dialogue (e.g. "Reload!")
             if (spaceCount < 1) {
                 val endsWithDialoguePunct = strippedCore.endsWith("!") || strippedCore.endsWith("?") || strippedCore.endsWith(".")
-                val startsWithCapital = strippedCore.first().isUpperCase() && strippedCore.drop(1).all { it.isLowerCase() || it in "!?.…" }
-                if (!(endsWithDialoguePunct && startsWithCapital)) return false
+                val lettersOnly = strippedCore.dropLast(1)
+                val isCleanCapitalWord = lettersOnly.length >= 4 &&
+                    lettersOnly.first().isUpperCase() &&
+                    lettersOnly.drop(1).all { it.isLowerCase() }
+                if (!(endsWithDialoguePunct && isCleanCapitalWord)) return false
             } else {
                 val words = strippedCore.split(Regex("""\s+""")).filter { it.isNotBlank() }
                 if (words.size < 2) return false
-                val realWords = words.count { w -> w.count { it.isLetter() } >= 2 }
-                if (realWords < 1) return false
+                // Reject strings containing cipher/hex-like mixed tokens (e.g. "31C54Fz")
+                for (w in words) {
+                    val cleanW = w.trim('.', ',', '!', '?', ':', ';', '"', '\'', '(', ')', '[', ']')
+                    if (cleanW.length >= 4 && RANDOM_ALPHANUM_TOKEN_REGEX.matches(cleanW)) {
+                        return false
+                    }
+                    // Reject words with 5+ consecutive consonants
+                    if (Regex("""[bcdfghjklmnpqrstvwxzBCDFGHJKLMNPQRSTVWXZ]{5,}""").containsMatchIn(cleanW)) {
+                        return false
+                    }
+                }
+                val realWords = words.count { w ->
+                    val letters = w.filter { it.isLetter() }
+                    letters.length >= 2 && letters.any { VOWELS.indexOf(it) >= 0 }
+                }
+                if (realWords < 2) return false
             }
         }
 

@@ -97,21 +97,26 @@ fun Tier1RulesAndTreeTab(
                 ) {
                     Icon(
                         imageVector = Icons.Default.AccountTree,
-                        contentDescription = "Cây thư mục ISO",
+                        contentDescription = "Cây thư mục ISO & Decompiler",
                         tint = ScoutCyan
                     )
                     Text(
-                        text = "Nhiệm Vụ 1 (Tầng 1): Dò Cây Thư Mục PSP_GAME/USRDIR",
+                        text = "Nhiệm Vụ 1 (Tầng 1): Decompiler JPCSP + QuickBMS & AI Chọn File",
                         style = MaterialTheme.typography.titleLarge
                     )
                 }
 
                 Text(
                     text = uiState.scoutResult?.analysisSummary
-                        ?: "Chưa quét file .iso. Bấm 'Nạp ROM Mẫu' ở tab Luồng Dịch để xem cây thư mục PSP_GAME/USRDIR.",
+                        ?: "Chưa quét file .iso. Bấm 'Nạp ROM Mẫu' hoặc chọn file .iso ở tab Luồng Dịch để chạy bộ dịch ngược MIPS Allegrex + QuickBMS.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                val selectedByAiPaths = uiState.scoutResult?.selectedFilePaths
+                    ?.map { it.uppercase() }
+                    ?.toSet()
+                    ?: emptySet()
 
                 val files = uiState.isoEntries.filter { !it.isDirectory }
                 files.forEach { fileEntry ->
@@ -119,15 +124,17 @@ fun Tier1RulesAndTreeTab(
                         uiState.scoutResult?.primaryTargetFile,
                         ignoreCase = true
                     )
-                    val isSkippedEboot = fileEntry.isSystemExecutable
+                    val isAiSelected = isPrimary || selectedByAiPaths.contains(fileEntry.path.uppercase())
+                    val isKirkOrHighEntropy = fileEntry.isKirkEncrypted || fileEntry.shannonEntropy > 6.8
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
                             .background(
                                 when {
-                                    isPrimary -> ScoutCyan.copy(alpha = 0.14f)
-                                    fileEntry.isCandidateArchiveOrScript -> PatchEmerald.copy(alpha = 0.10f)
+                                    isPrimary -> ScoutCyan.copy(alpha = 0.16f)
+                                    isAiSelected -> PatchEmerald.copy(alpha = 0.12f)
                                     else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                                 }
                             )
@@ -135,7 +142,7 @@ fun Tier1RulesAndTreeTab(
                                 width = 1.dp,
                                 color = when {
                                     isPrimary -> ScoutCyan
-                                    fileEntry.isCandidateArchiveOrScript -> PatchEmerald.copy(alpha = 0.5f)
+                                    isAiSelected -> PatchEmerald.copy(alpha = 0.7f)
                                     else -> Color.Transparent
                                 },
                                 shape = RoundedCornerShape(10.dp)
@@ -144,7 +151,7 @@ fun Tier1RulesAndTreeTab(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -162,12 +169,25 @@ fun Tier1RulesAndTreeTab(
                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text(
-                                            text = "AI TẦNG 1 CHỈ ĐIỂM",
+                                            text = "AI CHỌN CHÍNH",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color.Black
                                         )
                                     }
-                                } else if (isSkippedEboot) {
+                                } else if (isAiSelected) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(PatchEmerald.copy(alpha = 0.25f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "AI CHỌN DỊCH",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = PatchEmerald
+                                        )
+                                    }
+                                } else if (isKirkOrHighEntropy) {
                                     Box(
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(4.dp))
@@ -175,22 +195,9 @@ fun Tier1RulesAndTreeTab(
                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                     ) {
                                         Text(
-                                            text = "BỎ QUA EBOOT (CHỈ QUÉT USRDIR)",
+                                            text = if (fileEntry.isKirkEncrypted) "KIRK ~PSP ENCRYPTED" else "HIGH ENTROPY BINARY",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color(0xFFFCA5A5)
-                                        )
-                                    }
-                                } else if (fileEntry.isCandidateArchiveOrScript) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(4.dp))
-                                            .background(PatchEmerald.copy(alpha = 0.22f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text(
-                                            text = "USRDIR ARCHIVE",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = PatchEmerald
                                         )
                                     }
                                 }
@@ -202,14 +209,23 @@ fun Tier1RulesAndTreeTab(
                             )
                             Text(
                                 text = "Định dạng: ${fileEntry.containerFormatLabel}" +
-                                    (if (fileEntry.subFileCount > 0) " • TOC Sub-files: ${fileEntry.subFileCount}" else "") +
-                                    (if (fileEntry.hasPointerTable) " • Pointer Table: CÓ" else ""),
+                                    " • Entropy: ${fileEntry.shannonEntropy}/8.0" +
+                                    (if (fileEntry.subFileCount > 0) " • TOC: ${fileEntry.subFileCount}" else "") +
+                                    (if (fileEntry.mipsXrefCount > 0) " • MIPS XREFs: ${fileEntry.mipsXrefCount}" else ""),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (fileEntry.hasPointerTable) PatchEmerald else CodeViolet
+                                color = if (fileEntry.hasPointerTable || fileEntry.mipsXrefCount > 0) PatchEmerald else CodeViolet
                             )
-                            if (fileEntry.asciiSamplePreview.isNotBlank()) {
+                            if (fileEntry.decompiledAsmPreview.isNotEmpty()) {
                                 Text(
-                                    text = "Header ASCII: \"${fileEntry.asciiSamplePreview.take(44)}\"",
+                                    text = "ASM (JPCSP): ${fileEntry.decompiledAsmPreview.take(2).joinToString(" | ")}",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = ScoutCyan
+                                )
+                            }
+                            if (fileEntry.decompiledSampleStrings.isNotEmpty()) {
+                                Text(
+                                    text = "Decompiled Strings (${fileEntry.decompiledSampleStrings.size}): " +
+                                        fileEntry.decompiledSampleStrings.take(2).joinToString(" | ") { "\"${it.take(42)}\"" },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = BulkAmber
                                 )

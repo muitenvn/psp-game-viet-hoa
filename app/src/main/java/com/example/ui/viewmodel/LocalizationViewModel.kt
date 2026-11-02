@@ -107,6 +107,18 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private suspend fun restoreSessionFromRoom(session: RomSessionEntity) {
+        // Verify stored entries are valid human-readable strings (auto-purge any legacy \uFFFD garbage)
+        val storedEntries = repository.getAllEntries(session.romId)
+        val hasCorruptedGarbage = storedEntries.any { entry ->
+            entry.originalText.indexOf('\uFFFD') >= 0 ||
+                ! com.example.domain.iso.SmartTextHeuristicFilter.isValidGameSentence(entry.originalText)
+        }
+        if (hasCorruptedGarbage) {
+            repository.resetSession(session.romId)
+            appendLog("[DECOMPILER GUARD] Đã tự động dọn sạch dữ liệu nhị phân lỗi (ký tự \\uFFFD) từ phiên cũ.")
+            return
+        }
+
         _activeRomIdFlow.value = session.romId
         val rules = TranslationRules.fromJsonString(session.translationRulesJson)
         val parsedUri = runCatching { Uri.parse(session.isoUriString) }.getOrNull()
@@ -137,7 +149,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 } else {
                     stage.labelVi
                 },
-                statusSubtext = "File mục tiêu: ${session.targetFilePath} • Bấm 'Tiếp tục dịch' để chạy từ câu #${session.translatedStrings + 1}.",
+                statusSubtext = "File AI chọn: ${session.targetFilePath} • Bấm 'Tiếp tục dịch' để chạy từ câu #${session.translatedStrings + 1}.",
                 totalStrings = session.totalStrings,
                 translatedStrings = session.translatedStrings,
                 patchedStrings = session.patchedStrings,
@@ -240,45 +252,55 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 isRunning = true,
                 errorMessage = null,
                 stage = PipelineStage.SCANNING_ISO,
-                statusHeadline = "Đang dò cây thư mục ISO qua RandomAccessFile...",
-                statusSubtext = "Đọc Primary Volume Descriptor (Sector 16) và PSP_GAME/USRDIR..."
+                statusHeadline = "Đang chạy bộ Dịch Mã Ngược (MIPS Allegrex Decompiler)...",
+                statusSubtext = "Phân tích lệnh hợp ngữ MIPS LUI/ADDIU, bảng TOC/strg và Shannon Entropy trên từng file..."
             )
         }
         val summary = isoEngine.scanIsoDirectoryTree(uri)
         val romId = "${summary.volumeId}_${summary.isoSizeBytes}".replace(Regex("[^A-Za-z0-9_-]"), "_")
         _activeRomIdFlow.value = romId
 
-        appendLog("Đọc thành công ISO Volume '${summary.volumeId}' (${summary.isoSizeBytes / 1024} KB) - Tìm thấy ${summary.entries.size} mục trong cây thư mục.")
+        appendLog("Đọc thành công ISO '${summary.volumeId}' (${summary.isoSizeBytes / 1024} KB) - Đã dịch mã ngược ${summary.entries.size} mục (${summary.usrDirArchiveCount} file có chuỗi hội thoại hợp lệ).")
 
-        // Check if Room DB already has a checkpoint for this ROM
+        // Check if Room DB already has a valid checkpoint for this ROM
         val existingSession = repository.getSession(romId)
         if (existingSession != null && existingSession.totalStrings > 0) {
-            val rules = TranslationRules.fromJsonString(existingSession.translationRulesJson)
-            val scout = twoTierManager.heuristicFallbackScout(summary.entries)
-            _uiState.update {
-                it.copy(
-                    activeRomId = romId,
-                    romTitle = summary.volumeId,
-                    isoFileName = displayFileName,
-                    isoUri = uri,
-                    isoSizeBytes = summary.isoSizeBytes,
-                    isoEntries = summary.entries,
-                    scoutResult = scout,
-                    translationRules = rules,
-                    totalStrings = existingSession.totalStrings,
-                    translatedStrings = existingSession.translatedStrings,
-                    patchedStrings = existingSession.patchedStrings,
-                    stage = if (existingSession.translatedStrings < existingSession.totalStrings) PipelineStage.PAUSED_QUOTA else PipelineStage.COMPLETED,
-                    statusHeadline = "Đã nạp ROM & khôi phục Checkpoint (${existingSession.translatedStrings}/${existingSession.totalStrings} câu)",
-                    statusSubtext = "File ngôn ngữ: ${existingSession.targetFilePath} • Sẵn sàng dịch tiếp hoặc đóng gói ISO.",
-                    isRunning = false
-                )
+            val storedEntries = repository.getAllEntries(romId)
+            val hasCorrupted = storedEntries.any {
+                it.originalText.indexOf('\uFFFD') >= 0 ||
+                    !com.example.domain.iso.SmartTextHeuristicFilter.isValidGameSentence(it.originalText)
             }
-            appendLog("Phát hiện dữ liệu Checkpoint trong Room SQLite: ${existingSession.translatedStrings}/${existingSession.totalStrings} câu đã dịch.")
-            return
+            if (hasCorrupted) {
+                repository.resetSession(romId)
+                appendLog("[DECOMPILER GUARD] Đã xóa bộ nhớ đệm cũ chứa chuỗi rác và quét lại bằng bộ Dịch Mã Ngược.")
+            } else {
+                val rules = TranslationRules.fromJsonString(existingSession.translationRulesJson)
+                val scout = twoTierManager.heuristicFallbackScout(summary.entries)
+                _uiState.update {
+                    it.copy(
+                        activeRomId = romId,
+                        romTitle = summary.volumeId,
+                        isoFileName = displayFileName,
+                        isoUri = uri,
+                        isoSizeBytes = summary.isoSizeBytes,
+                        isoEntries = summary.entries,
+                        scoutResult = scout,
+                        translationRules = rules,
+                        totalStrings = existingSession.totalStrings,
+                        translatedStrings = existingSession.translatedStrings,
+                        patchedStrings = existingSession.patchedStrings,
+                        stage = if (existingSession.translatedStrings < existingSession.totalStrings) PipelineStage.PAUSED_QUOTA else PipelineStage.COMPLETED,
+                        statusHeadline = "Đã nạp ROM & khôi phục Checkpoint (${existingSession.translatedStrings}/${existingSession.totalStrings} câu)",
+                        statusSubtext = "File AI chọn: ${existingSession.targetFilePath} • Sẵn sàng dịch tiếp hoặc đóng gói ISO.",
+                        isRunning = false
+                    )
+                }
+                appendLog("Phát hiện dữ liệu Checkpoint sạch trong Room SQLite: ${existingSession.translatedStrings}/${existingSession.totalStrings} câu đã dịch.")
+                return
+            }
         }
 
-        // Fresh ROM scan: preview heuristic scout immediately
+        // Fresh ROM scan: preview Decompiler report before AI Tier 1 runs
         val initialScout = twoTierManager.heuristicFallbackScout(summary.entries)
         _uiState.update {
             it.copy(
@@ -293,8 +315,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 translatedStrings = 0,
                 patchedStrings = 0,
                 stage = PipelineStage.IDLE,
-                statusHeadline = "Đã đọc cây thư mục ISO (${summary.entries.size} mục)",
-                statusSubtext = "Ứng viên số 1: ${initialScout.primaryTargetFile}. Bấm 'Chạy Việt Hóa AI 2 Tầng' để bắt đầu.",
+                statusHeadline = "Đã Dịch Mã Ngược ${summary.entries.size} mục trong ISO",
+                statusSubtext = "Bấm 'Chạy Việt Hóa AI 2 Tầng' để AI Tầng 1 tự động chọn các file từ báo cáo dịch mã ngược.",
                 isRunning = false
             )
         }
@@ -343,16 +365,17 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
             if (existingCount == 0) {
                 // =========================================================================
-                // TIER 1 - TASK 1: Scout & Identify Language File in PSP_GAME/USRDIR
+                // TIER 1 - TASK 1: Send Reverse Engineering Decompiler Report to AI Tier 1
+                // so the AI chooses the exact files (`selectedFilePaths`)!
                 // =========================================================================
                 _uiState.update {
                     it.copy(
                         stage = PipelineStage.SCANNING_ISO,
-                        statusHeadline = "Đang dò file ngôn ngữ (AI Tầng 1: ${it.tier1Model})...",
-                        statusSubtext = "Gửi cây thư mục PSP_GAME/USRDIR cho AI Tầng 1 chỉ điểm file chứa text..."
+                        statusHeadline = "AI Tầng 1 (${it.tier1Model}) đang chọn file từ Báo cáo Dịch Mã Ngược...",
+                        statusSubtext = "Gửi kết quả dịch mã ngược MIPS Allegrex + TOC/strg cho AI Tầng 1 quyết định file cần dịch..."
                     )
                 }
-                appendLog("[TẦNG 1 - TASK 1] Gửi danh sách ${state.isoEntries.size} file trong ISO cho model ${state.tier1Model}...")
+                appendLog("[TẦNG 1 - TASK 1] Gửi báo cáo Dịch Mã Ngược của ${state.isoEntries.size} file trong ISO cho AI (${state.tier1Model}) tự chọn file...")
 
                 val scoutResult = twoTierManager.scoutLanguageFilesWithTier1(
                     volumeId = state.romTitle,
@@ -360,26 +383,27 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                     tier1ModelName = state.tier1Model,
                     customApiKey = state.customApiKey
                 )
-                appendLog("[TẦNG 1 - KẾT QUẢ] File ngôn ngữ chính: ${scoutResult.primaryTargetFile} (${scoutResult.analysisSummary})")
+                appendLog("[AI CHỌN FILE] AI Tầng 1 đã chọn ${scoutResult.selectedFilePaths.size} file (Chính: ${scoutResult.primaryTargetFile}) • ${scoutResult.analysisSummary}")
 
                 val targetEntry = state.isoEntries.firstOrNull {
-                    it.path.equals(scoutResult.primaryTargetFile, ignoreCase = true) && !it.isSystemExecutable
-                } ?: state.isoEntries.firstOrNull { it.isCandidateArchiveOrScript }
-                ?: state.isoEntries.firstOrNull { !it.isDirectory && !it.isSystemExecutable && it.sizeBytes > 64 }
-                ?: throw IllegalStateException("Không tìm thấy file archive/ngôn ngữ hợp lệ trong PSP_GAME/USRDIR.")
+                    it.path.equals(scoutResult.primaryTargetFile, ignoreCase = true) && !it.isKirkEncrypted
+                } ?: state.isoEntries.firstOrNull { !it.isDirectory && !it.isKirkEncrypted && it.decompiledSampleStrings.isNotEmpty() }
+                ?: state.isoEntries.firstOrNull { !it.isDirectory && !it.isKirkEncrypted && it.sizeBytes > 64 }
+                ?: throw IllegalStateException("Không tìm thấy file hợp lệ sau khi chạy bộ Dịch Mã Ngược.")
 
-                // Extract strings recursively across PSP_GAME/USRDIR archives (.PAK, .DAT, .BIN, .WAD)
+                // Decompile and extract clean strings across the exact files selected by AI Tier 1
                 val extractedRecords = isoEngine.extractStringsAcrossUsrDirArchives(
                     uri = uri,
                     allIsoEntries = state.isoEntries,
                     primaryRecommendedPath = targetEntry.path,
+                    aiSelectedFilePaths = scoutResult.selectedFilePaths,
                     maxTotalStrings = 600
                 )
                 if (extractedRecords.isEmpty()) {
-                    throw IllegalStateException("Không trích xuất được chuỗi hội thoại hợp lệ nào từ PSP_GAME/USRDIR/.")
+                    throw IllegalStateException("Không tìm thấy chuỗi hội thoại văn bản hợp lệ nào (các file trong ROM có thể đã bị mã hóa phần cứng Kirk ~PSP).")
                 }
                 val distinctArchives = extractedRecords.map { it.sourceFilePath }.distinct()
-                appendLog("[USRDIR UNPACKER] Đã giải nén & trích xuất ${extractedRecords.size} chuỗi hợp lệ (>= 5 ký tự, loại bỏ mã hàm EBOOT.BIN) từ ${distinctArchives.size} container trong PSP_GAME/USRDIR.")
+                appendLog("[DECOMPILER] Đã dịch mã ngược & trích xuất ${extractedRecords.size} câu thoại sạch (0% ký tự lỗi) từ ${distinctArchives.size} file do AI chỉ định.")
 
                 // =========================================================================
                 // TIER 1 - TASK 2: Extract 30-50 Sample Strings -> Generate translation_rules.json

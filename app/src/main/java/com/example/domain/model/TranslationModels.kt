@@ -17,7 +17,12 @@ data class IsoFileEntry(
     val magic4BytesHex: String = "",
     val containerFormatLabel: String = "RAW",
     val subFileCount: Int = 0,
-    val hasPointerTable: Boolean = false
+    val hasPointerTable: Boolean = false,
+    val isKirkEncrypted: Boolean = false,
+    val shannonEntropy: Double = 0.0,
+    val mipsXrefCount: Int = 0,
+    val decompiledAsmPreview: List<String> = emptyList(),
+    val decompiledSampleStrings: List<String> = emptyList()
 ) {
     val byteOffsetInIso: Long
         get() = lbaSector * 2048L
@@ -32,23 +37,16 @@ data class IsoFileEntry(
         }
 
     val isCandidateArchiveOrScript: Boolean
-        get() {
-            if (isDirectory || isSystemExecutable || sizeBytes <= 32) return false
-            val lower = name.lowercase()
-            val candidateExts = listOf(
-                ".pak", ".dat", ".bin", ".wad", ".txt", ".str", ".cfg",
-                ".loc", ".lng", ".msg", ".tbl", ".scr",
-                ".res", ".csv", ".xml", ".json", ".ini", ".sub"
-            )
-            return isInsideUsrDir && candidateExts.any { lower.endsWith(it) }
-        }
+        get() = !isDirectory && !isKirkEncrypted && decompiledSampleStrings.isNotEmpty()
 }
 
 /**
- * Output of Tier 1 Task 1: Candidate language/script files discovered by AI Scout in `PSP_GAME/USRDIR/`.
+ * Output of Tier 1 Task 1: Language/script files selected directly by AI after inspecting
+ * the Reverse Engineering Decompiler report for all files in the ISO.
  */
 data class ScoutFileAnalysisResult(
     val primaryTargetFile: String,
+    val selectedFilePaths: List<String> = emptyList(),
     val candidateFiles: List<CandidateScriptFile>,
     val analysisSummary: String
 )
