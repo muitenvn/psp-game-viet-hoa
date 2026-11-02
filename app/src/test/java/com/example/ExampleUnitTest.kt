@@ -23,7 +23,7 @@ class ExampleUnitTest {
         assertTrue(!maskedPayload.maskedText.contains("SYS_BTN_CROSS"))
         assertTrue(!maskedPayload.maskedText.contains("<color=01>"))
 
-        val simulatedTier2Vi = "{0}{1}{2} Nghe rõ đây, {3}! Nhấn {4} để bung khiên chiến thuật.{5}"
+        val simulatedTier2Vi = "{0}[Commander Vance]{1} Nghe rõ đây, {2}! Nhấn {3} để bung khiên chiến thuật.{4}"
         val restored = SystemTagMasker.restoreSystemTags(simulatedTier2Vi, maskedPayload.placeholderMap)
 
         assertEquals(
