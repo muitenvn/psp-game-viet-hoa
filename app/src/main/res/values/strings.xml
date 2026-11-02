@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">PSP Localization Studio</string>
+    <string name="hero_subtitle">Kiến trúc AI 2 Tầng • RandomAccessFile SAF • Room Checkpoint</string>
+    <string name="tab_pipeline">Luồng Dịch</string>
+    <string name="tab_rules">Tầng 1 &amp; Regex</string>
+    <string name="tab_strings">Bộ Nhớ Room</string>
+    <string name="tab_prompts">Prompts &amp; CI</string>
+    <string name="stage_idle">Sẵn sàng nạp ROM PSP (.iso)</string>
+    <string name="stage_scanning">Đang dò file ngôn ngữ trong PSP_GAME/USRDIR...</string>
+    <string name="stage_analyzing">Đang phân tích mã &amp; lập quy tắc dịch (AI Tầng 1)...</string>
+    <string name="stage_translating">Đang dịch hàng loạt &amp; lưu checkpoint Room (AI Tầng 2)...</string>
+    <string name="stage_repacking">Đang đóng gói &amp; ghi nhị phân vào ROM .ISO...</string>
+    <string name="stage_completed">Hoàn tất Việt hóa &amp; đóng gói ROM PSP (.iso)</string>
+</resources>

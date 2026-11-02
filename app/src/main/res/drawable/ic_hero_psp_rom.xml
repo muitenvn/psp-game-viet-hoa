@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="360dp"
+    android:height="140dp"
+    android:viewportWidth="360"
+    android:viewportHeight="140">
+    <path android:pathData="M0,0h360v140h-360z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="360"
+                android:endY="140"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#090D16" />
+                <item android:offset="0.55" android:color="#111C33" />
+                <item android:offset="1.0" android:color="#1A2744" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Subtle tech grid -->
+    <path
+        android:strokeColor="#1E3A5F"
+        android:strokeWidth="0.6"
+        android:pathData="M0,35 L360,35 M0,70 L360,70 M0,105 L360,105 M60,0 L60,140 M120,0 L120,140 M180,0 L180,140 M240,0 L240,140 M300,0 L300,140" />
+    <!-- Glowing UMD Disc representation on right -->
+    <path
+        android:strokeColor="#00F5D4"
+        android:strokeWidth="2.5"
+        android:fillColor="#1400F5D4"
+        android:pathData="M295,70m-44,0a44,44 0,1 1,88 0a44,44 0,1 1,-88 0" />
+    <path
+        android:strokeColor="#FFB703"
+        android:strokeWidth="1.8"
+        android:fillColor="#22FFB703"
+        android:pathData="M295,70m-16,0a16,16 0,1 1,32 0a16,16 0,1 1,-32 0" />
+    <!-- Laser scan beams -->
+    <path
+        android:strokeColor="#00F5D4"
+        android:strokeWidth="1.5"
+        android:pathData="M180,42 L255,58" />
+    <path
+        android:strokeColor="#FFB703"
+        android:strokeWidth="1.5"
+        android:pathData="M180,98 L255,82" />
+</vector>
