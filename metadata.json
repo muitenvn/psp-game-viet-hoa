@@ -2,5 +2,7 @@
   "name": "PSP Localization Studio",
   "description": "Two-Tier AI PSP ROM (.iso) Vietnamese Localization & Binary Patching Studio",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

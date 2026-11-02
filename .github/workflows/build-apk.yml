@@ -22,26 +22,35 @@ jobs:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Set up JDK 21
+      - name: 2. Set up JDK 21 (Temurin)
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: 3. Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 4. Accept Android SDK Licenses & Install Build Tools
+      - name: 3. Configure Android SDK & Accept Licenses (No legacy 'tools' package)
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "build-tools;36.0.0" || true
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="${ANDROID_HOME}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> $GITHUB_ENV
 
-      - name: 5. Set up Gradle 9.3.1
+          mkdir -p "${ANDROID_HOME}/licenses"
+          printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n8933bad161af4178b1185d1a37fbf41ea5269c55\n" > "${ANDROID_HOME}/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910\n" > "${ANDROID_HOME}/licenses/android-sdk-preview-license"
+
+          SDKMANAGER_BIN=$(find "${ANDROID_HOME}/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          if [ -n "${SDKMANAGER_BIN}" ]; then
+            yes | "${SDKMANAGER_BIN}" --licenses > /dev/null 2>&1 || true
+            "${SDKMANAGER_BIN}" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          fi
+
+      - name: 4. Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
-      - name: 6. Prepare .env and Debug Keystore
+      - name: 5. Prepare .env and Debug Keystore
         run: |
           if [ ! -f .env ]; then
             if [ -f .env.example ]; then
@@ -63,11 +72,11 @@ jobs:
             fi
           fi
 
-      - name: 7. Build Debug APK with Gradle
+      - name: 6. Build Debug APK with Gradle
         run: |
           gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: 8. Prepare APK File for Release
+      - name: 7. Prepare APK File for Release
         id: package_apk
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
@@ -82,7 +91,7 @@ jobs:
           echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
           echo "sha_name=${APK_NAME}.sha256" >> $GITHUB_OUTPUT
 
-      - name: 9. Upload APK to GitHub Actions Artifacts
+      - name: 8. Upload APK to GitHub Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package_apk.outputs.apk_name }}
@@ -90,7 +99,7 @@ jobs:
             ${{ steps.package_apk.outputs.apk_name }}
             ${{ steps.package_apk.outputs.sha_name }}
 
-      - name: 10. Publish APK to GitHub Releases
+      - name: 9. Publish APK to GitHub Releases
         if: "!startsWith(github.ref, 'refs/pull/')"
         uses: softprops/action-gh-release@v2
         with:

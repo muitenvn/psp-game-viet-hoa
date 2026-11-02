@@ -177,7 +177,9 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-      - uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | ${'$'}ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
