@@ -119,24 +119,32 @@ fun Tier1RulesAndTreeTab(
                         uiState.scoutResult?.primaryTargetFile,
                         ignoreCase = true
                     )
+                    val isSkippedEboot = fileEntry.isSystemExecutable
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
                             .background(
-                                if (isPrimary) ScoutCyan.copy(alpha = 0.14f)
-                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                when {
+                                    isPrimary -> ScoutCyan.copy(alpha = 0.14f)
+                                    fileEntry.isCandidateArchiveOrScript -> PatchEmerald.copy(alpha = 0.10f)
+                                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                }
                             )
                             .border(
                                 width = 1.dp,
-                                color = if (isPrimary) ScoutCyan else Color.Transparent,
+                                color = when {
+                                    isPrimary -> ScoutCyan
+                                    fileEntry.isCandidateArchiveOrScript -> PatchEmerald.copy(alpha = 0.5f)
+                                    else -> Color.Transparent
+                                },
                                 shape = RoundedCornerShape(10.dp)
                             )
                             .padding(10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -159,16 +167,49 @@ fun Tier1RulesAndTreeTab(
                                             color = Color.Black
                                         )
                                     }
+                                } else if (isSkippedEboot) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(Color(0xFFEF4444).copy(alpha = 0.25f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "BỎ QUA EBOOT (CHỈ QUÉT USRDIR)",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFFFCA5A5)
+                                        )
+                                    }
+                                } else if (fileEntry.isCandidateArchiveOrScript) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(4.dp))
+                                            .background(PatchEmerald.copy(alpha = 0.22f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "USRDIR ARCHIVE",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = PatchEmerald
+                                        )
+                                    }
                                 }
                             }
                             Text(
-                                text = "LBA: ${fileEntry.lbaSector} (Offset 0x${(fileEntry.byteOffsetInIso).toString(16).uppercase()}) • Size: ${fileEntry.sizeBytes} B",
+                                text = "LBA: ${fileEntry.lbaSector} (0x${(fileEntry.byteOffsetInIso).toString(16).uppercase()}) • Size: ${fileEntry.sizeBytes} B • Magic: [${fileEntry.magic4BytesHex.ifBlank { "N/A" }}]",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Text(
+                                text = "Định dạng: ${fileEntry.containerFormatLabel}" +
+                                    (if (fileEntry.subFileCount > 0) " • TOC Sub-files: ${fileEntry.subFileCount}" else "") +
+                                    (if (fileEntry.hasPointerTable) " • Pointer Table: CÓ" else ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (fileEntry.hasPointerTable) PatchEmerald else CodeViolet
+                            )
                             if (fileEntry.asciiSamplePreview.isNotBlank()) {
                                 Text(
-                                    text = "Header ASCII: \"${fileEntry.asciiSamplePreview.take(40)}\"",
+                                    text = "Header ASCII: \"${fileEntry.asciiSamplePreview.take(44)}\"",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = BulkAmber
                                 )

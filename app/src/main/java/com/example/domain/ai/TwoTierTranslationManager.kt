@@ -608,48 +608,61 @@ class TwoTierTranslationManager(
             }
         }
         val fallbackScout = heuristicFallbackScout(isoEntries)
-        val resolvedPrimary = if (isoEntries.any { it.path.equals(primary, ignoreCase = true) }) {
-            primary
-        } else {
-            fallbackScout.primaryTargetFile
+        val matchedPrimaryEntry = isoEntries.firstOrNull {
+            it.path.equals(primary, ignoreCase = true) && !it.isSystemExecutable
         }
+        val resolvedPrimary = matchedPrimaryEntry?.path ?: fallbackScout.primaryTargetFile
         return ScoutFileAnalysisResult(
             primaryTargetFile = resolvedPrimary,
-            candidateFiles = if (candidates.isNotEmpty()) candidates else fallbackScout.candidateFiles,
+            candidateFiles = if (candidates.isNotEmpty()) {
+                candidates.filterNot { it.path.uppercase().endsWith("EBOOT.BIN") }.ifEmpty { fallbackScout.candidateFiles }
+            } else {
+                fallbackScout.candidateFiles
+            },
             analysisSummary = summary
         )
     }
 
     fun heuristicFallbackScout(isoEntries: List<IsoFileEntry>): ScoutFileAnalysisResult {
-        val filesOnly = isoEntries.filter { !it.isDirectory && it.sizeBytes > 0 }
-        val scored = filesOnly.map { entry ->
+        // Strictly prioritize files inside PSP_GAME/USRDIR/ and exclude EBOOT.BIN / BOOT.BIN / .PRX
+        val usrDirFiles = isoEntries.filter { !it.isDirectory && it.isInsideUsrDir && !it.isSystemExecutable && it.sizeBytes > 32 }
+        val poolToScore = if (usrDirFiles.isNotEmpty()) {
+            usrDirFiles
+        } else {
+            isoEntries.filter { !it.isDirectory && !it.isSystemExecutable && it.sizeBytes > 32 }
+        }
+
+        val scored = poolToScore.map { entry ->
             val lower = entry.path.lowercase()
-            val score = when {
-                lower.contains("usrdir") && (lower.contains("script") || lower.contains("mes") || lower.contains("msg") || lower.contains("text")) -> 98
-                lower.contains("usrdir") && (lower.endsWith(".bin") || lower.endsWith(".dat") || lower.endsWith(".pak")) -> 86
-                lower.endsWith("eboot.bin") -> 65
-                lower.endsWith(".sfo") -> 50
-                else -> 15
+            var score = when {
+                lower.contains("usrdir") && (lower.contains("script") || lower.contains("mes") || lower.contains("msg") || lower.contains("text") || lower.contains("str") || lower.contains("loc")) -> 96
+                lower.contains("usrdir") && (lower.endsWith(".pak") || lower.endsWith(".wad") || lower.endsWith(".dat") || lower.endsWith(".bin") || lower.endsWith(".str") || lower.endsWith(".txt")) -> 88
+                entry.isCandidateArchiveOrScript -> 82
+                else -> 25
+            }
+            if (entry.hasPointerTable || entry.subFileCount > 0) {
+                score = (score + 4).coerceAtMost(99)
             }
             val reason = when {
-                score >= 90 -> "File kịch bản chính trong PSP_GAME/USRDIR chứa chuỗi thoại kèm thẻ điều khiển (%s, <color>, SYS_BTN)."
-                score >= 80 -> "File dữ liệu giao diện / chuỗi hệ thống trong USRDIR."
-                score >= 60 -> "File thực thi chính EBOOT.BIN chứa chuỗi hardcode."
-                else -> "File tài nguyên hệ thống / media."
+                entry.subFileCount > 0 -> "Archive ${entry.containerFormatLabel} (${entry.subFileCount} sub-files / TOC) trong PSP_GAME/USRDIR."
+                entry.hasPointerTable -> "Bảng Pointer Table (${entry.containerFormatLabel}, Magic: ${entry.magic4BytesHex}) chứa chuỗi thoại & nhiệm vụ."
+                score >= 85 -> "File tài nguyên / kịch bản trong PSP_GAME/USRDIR (${entry.containerFormatLabel}, Magic: ${entry.magic4BytesHex})."
+                else -> "File dữ liệu trong USRDIR."
             }
             CandidateScriptFile(
                 path = entry.path,
                 confidenceScore = score,
-                estimatedEncoding = "UTF-8 / ASCII",
+                estimatedEncoding = entry.containerFormatLabel,
                 reason = reason
             )
         }.sortedByDescending { it.confidenceScore }
 
         val best = scored.firstOrNull()?.path ?: "PSP_GAME/USRDIR/script_en.bin"
+        val archiveCount = usrDirFiles.count { it.isCandidateArchiveOrScript }
         return ScoutFileAnalysisResult(
             primaryTargetFile = best,
-            candidateFiles = scored.take(5),
-            analysisSummary = "AI Tầng 1 đã quét cây thư mục PSP_GAME/USRDIR và xác định '$best' là file kịch bản chính có mật độ văn bản cao nhất."
+            candidateFiles = scored.take(8),
+            analysisSummary = "Đã quét đệ quy PSP_GAME/USRDIR (${usrDirFiles.size} tệp, $archiveCount archive .PAK/.DAT/.BIN/.WAD, tự động loại bỏ EBOOT.BIN) và chọn '$best' làm container chính."
         )
     }
 

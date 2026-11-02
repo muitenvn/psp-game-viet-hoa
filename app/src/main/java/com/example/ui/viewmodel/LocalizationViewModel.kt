@@ -363,20 +363,23 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 appendLog("[TẦNG 1 - KẾT QUẢ] File ngôn ngữ chính: ${scoutResult.primaryTargetFile} (${scoutResult.analysisSummary})")
 
                 val targetEntry = state.isoEntries.firstOrNull {
-                    it.path.equals(scoutResult.primaryTargetFile, ignoreCase = true)
-                } ?: state.isoEntries.firstOrNull { !it.isDirectory && it.sizeBytes > 128 }
-                ?: throw IllegalStateException("Không tìm thấy file ngôn ngữ hợp lệ trong ISO.")
+                    it.path.equals(scoutResult.primaryTargetFile, ignoreCase = true) && !it.isSystemExecutable
+                } ?: state.isoEntries.firstOrNull { it.isCandidateArchiveOrScript }
+                ?: state.isoEntries.firstOrNull { !it.isDirectory && !it.isSystemExecutable && it.sizeBytes > 64 }
+                ?: throw IllegalStateException("Không tìm thấy file archive/ngôn ngữ hợp lệ trong PSP_GAME/USRDIR.")
 
-                // Extract strings via RandomAccessFile
-                val extractedRecords = isoEngine.extractStringsFromIsoFile(
+                // Extract strings recursively across PSP_GAME/USRDIR archives (.PAK, .DAT, .BIN, .WAD)
+                val extractedRecords = isoEngine.extractStringsAcrossUsrDirArchives(
                     uri = uri,
-                    targetEntry = targetEntry,
-                    maxStrings = 500
+                    allIsoEntries = state.isoEntries,
+                    primaryRecommendedPath = targetEntry.path,
+                    maxTotalStrings = 600
                 )
                 if (extractedRecords.isEmpty()) {
-                    throw IllegalStateException("Không trích xuất được chuỗi văn bản nào từ ${targetEntry.path}.")
+                    throw IllegalStateException("Không trích xuất được chuỗi hội thoại hợp lệ nào từ PSP_GAME/USRDIR/.")
                 }
-                appendLog("[RANDOM_ACCESS_FILE] Đã trích xuất ${extractedRecords.size} chuỗi văn bản từ '${targetEntry.path}' (LBA ${targetEntry.lbaSector}).")
+                val distinctArchives = extractedRecords.map { it.sourceFilePath }.distinct()
+                appendLog("[USRDIR UNPACKER] Đã giải nén & trích xuất ${extractedRecords.size} chuỗi hợp lệ (>= 5 ký tự, loại bỏ mã hàm EBOOT.BIN) từ ${distinctArchives.size} container trong PSP_GAME/USRDIR.")
 
                 // =========================================================================
                 // TIER 1 - TASK 2: Extract 30-50 Sample Strings -> Generate translation_rules.json
@@ -411,7 +414,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                     )
                     TranslationEntryEntity(
                         romId = romId,
-                        targetFilePath = targetEntry.path,
+                        targetFilePath = rec.sourceFilePath,
                         stringIndex = rec.stringIndex,
                         byteOffsetInIso = rec.byteOffsetInIso,
                         allocatedByteLength = rec.allocatedByteLength,
@@ -491,42 +494,43 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             )
 
             // =========================================================================
-            // STEP 4: Repackage / Binary Patch Translated Strings Directly Into .ISO
+            // STEP 4: Repackage / Rebuild Pointer Table & Patch Directly Into .ISO
             // =========================================================================
             _uiState.update {
                 it.copy(
                     stage = PipelineStage.REPACKING_ISO,
                     cooldownRemainingSec = 0,
-                    statusHeadline = "Đang đóng gói ISO (RandomAccessFile Binary Patching)...",
-                    statusSubtext = "Ghi đè trực tiếp $finalTranslatedCount chuỗi UTF-8 đã khôi phục mã hệ thống vào file .iso..."
+                    statusHeadline = "Đang tính lại Pointer Table & Repack vào ISO...",
+                    statusSubtext = "Cập nhật bảng địa chỉ Offset/Size (TOC) & ghi $finalTranslatedCount chuỗi UTF-8 vào Sector/LBA..."
                 )
             }
-            appendLog("[ISO PATCHER] Bắt đầu ghi nhị phân $finalTranslatedCount câu thoại vào file .iso qua RandomAccessFile...")
+            appendLog("[ISO REPACKER] Bắt đầu tính toán lại Pointer Table (Offset/Size) & ghi $finalTranslatedCount câu vào file .iso...")
 
             val allTranslatedEntries = repository.getAllEntries(romId)
             val patchedCount = isoEngine.patchTranslatedEntriesIntoIso(
                 uri = uri,
                 entries = allTranslatedEntries,
+                isoEntries = _uiState.value.isoEntries,
                 onProgress = { done, total ->
                     _uiState.update { s ->
                         s.copy(
                             patchedStrings = done,
-                            statusHeadline = "Đang đóng gói ISO ($done/$total chuỗi)..."
+                            statusHeadline = "Đang cập nhật Pointer & đóng gói ISO ($done/$total chuỗi)..."
                         )
                     }
                 }
             )
 
             repository.markRomPatched(romId, PipelineStage.COMPLETED.name)
-            appendLog("[HOÀN TẤT] Đã đóng gói thành công $patchedCount câu tiếng Việt vào ROM '${_uiState.value.isoFileName}'.")
+            appendLog("[HOÀN TẤT] Đã cập nhật Pointer Table & đóng gói $patchedCount câu tiếng Việt vào ROM '${_uiState.value.isoFileName}'.")
 
             _uiState.update {
                 it.copy(
                     isRunning = false,
                     patchedStrings = patchedCount,
                     stage = PipelineStage.COMPLETED,
-                    statusHeadline = "Hoàn tất Việt hóa & Đóng gói ISO ($patchedCount/${it.totalStrings} câu)",
-                    statusSubtext = "Mọi mã hệ thống (%s, <color>, SYS_BTN) đã được bảo toàn 100% và lưu trong Room DB."
+                    statusHeadline = "Hoàn tất Việt hóa & Repack Pointer ISO ($patchedCount/${it.totalStrings} câu)",
+                    statusSubtext = "Bảng Pointer Table & LBA Sector đã được đồng bộ 100%, sẵn sàng chạy trên PPSSPP."
                 )
             }
         } catch (e: CancellationException) {

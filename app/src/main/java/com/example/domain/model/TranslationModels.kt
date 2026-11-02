@@ -1,6 +1,5 @@
 package com.example.domain.model
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -12,15 +11,41 @@ data class IsoFileEntry(
     val sizeBytes: Long,
     val lbaSector: Long,
     val isDirectory: Boolean = false,
+    val dirRecordIsoOffset: Long = 0L,
     val headerPreviewHex: String = "",
-    val asciiSamplePreview: String = ""
+    val asciiSamplePreview: String = "",
+    val magic4BytesHex: String = "",
+    val containerFormatLabel: String = "RAW",
+    val subFileCount: Int = 0,
+    val hasPointerTable: Boolean = false
 ) {
     val byteOffsetInIso: Long
         get() = lbaSector * 2048L
+
+    val isInsideUsrDir: Boolean
+        get() = path.uppercase().startsWith("PSP_GAME/USRDIR")
+
+    val isSystemExecutable: Boolean
+        get() {
+            val upper = name.uppercase()
+            return upper == "EBOOT.BIN" || upper == "BOOT.BIN" || upper.endsWith(".PRX")
+        }
+
+    val isCandidateArchiveOrScript: Boolean
+        get() {
+            if (isDirectory || isSystemExecutable || sizeBytes <= 32) return false
+            val lower = name.lowercase()
+            val candidateExts = listOf(
+                ".pak", ".dat", ".bin", ".wad", ".txt", ".str", ".cfg",
+                ".loc", ".lng", ".msg", ".tbl", ".scr",
+                ".res", ".csv", ".xml", ".json", ".ini", ".sub"
+            )
+            return isInsideUsrDir && candidateExts.any { lower.endsWith(it) }
+        }
 }
 
 /**
- * Output of Tier 1 Task 1: Candidate language/script files discovered by AI Scout.
+ * Output of Tier 1 Task 1: Candidate language/script files discovered by AI Scout in `PSP_GAME/USRDIR/`.
  */
 data class ScoutFileAnalysisResult(
     val primaryTargetFile: String,
@@ -143,12 +168,12 @@ data class TranslationRules(
  */
 enum class PipelineStage(val stepIndex: Int, val labelVi: String) {
     IDLE(0, "Sẵn sàng nạp ROM (.iso)"),
-    SCANNING_ISO(1, "Đang dò file ngôn ngữ (Tầng 1 - Task 1)"),
+    SCANNING_ISO(1, "Đang quét đệ quy PSP_GAME/USRDIR & giải nén PAK"),
     ANALYZING_RULES(2, "Đang phân tích mã & lập quy tắc (Tầng 1 - Task 2)"),
     TRANSLATING_BULK(3, "Đang dịch hàng loạt & lưu Room (Tầng 2)"),
-    REPACKING_ISO(4, "Đang đóng gói & vá nhị phân ISO"),
+    REPACKING_ISO(4, "Đang cập nhật Pointer Table & đóng gói ISO"),
     PAUSED_QUOTA(3, "Tạm dừng (Đã lưu Checkpoint vào Room DB)"),
-    COMPLETED(5, "Hoàn tất Việt hóa & Đóng gói ISO"),
+    COMPLETED(5, "Hoàn tất Việt hóa & Cập nhật Pointer ISO"),
     ERROR(0, "Gián đoạn (Đã bảo toàn tiến độ trong Room DB)")
 }
 
