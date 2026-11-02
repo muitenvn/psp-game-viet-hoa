@@ -84,10 +84,10 @@ fun PromptsAndWorkflowTab(
 
         PromptSpecificationCard(
             title = "3. GitHub Actions Tự Động Xuất .APK Lên GitHub Releases",
-            badge = ".github/workflows/release.yml",
+            badge = ".github/workflows/build-apk.yml",
             accentColor = PatchEmerald,
             codeContent = GITHUB_RELEASE_YML_PREVIEW,
-            onCopy = { copyText(context, "release.yml", it) }
+            onCopy = { copyText(context, "build-apk.yml", it) }
         )
     }
 }
@@ -160,29 +160,33 @@ private fun copyText(context: Context, label: String, content: String) {
 }
 
 private const val GITHUB_RELEASE_YML_PREVIEW = """
-name: Android APK Build & GitHub Release
+name: Build APK & Publish Release
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [ main, master, '**' ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 permissions:
   contents: write
 jobs:
-  build-and-release:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build Signed Debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon
+        with:
+          gradle-version: '9.3.1'
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon
       - name: Publish APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.${'$'}{{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
         env:
           GITHUB_TOKEN: ${'$'}{{ secrets.GITHUB_TOKEN }}

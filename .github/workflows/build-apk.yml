@@ -1,0 +1,111 @@
+name: Build APK & Publish Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - '**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build Android APK & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: 3. Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 4. Accept Android SDK Licenses & Install Build Tools
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "build-tools;36.0.0" || true
+
+      - name: 5. Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: 6. Prepare .env and Debug Keystore
+        run: |
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              keytool -genkeypair -v \
+                -keystore debug.keystore \
+                -alias androiddebugkey \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass android -keypass android \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+
+      - name: 7. Build Debug APK with Gradle
+        run: |
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: 8. Prepare APK File for Release
+        id: package_apk
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION_TAG="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION_TAG="v1.0.${{ github.run_number }}"
+          fi
+          APK_NAME="PSP-Localization-Studio-${VERSION_TAG}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "${APK_NAME}"
+          sha256sum "${APK_NAME}" > "${APK_NAME}.sha256"
+          echo "version_tag=${VERSION_TAG}" >> $GITHUB_OUTPUT
+          echo "apk_name=${APK_NAME}" >> $GITHUB_OUTPUT
+          echo "sha_name=${APK_NAME}.sha256" >> $GITHUB_OUTPUT
+
+      - name: 9. Upload APK to GitHub Actions Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package_apk.outputs.apk_name }}
+          path: |
+            ${{ steps.package_apk.outputs.apk_name }}
+            ${{ steps.package_apk.outputs.sha_name }}
+
+      - name: 10. Publish APK to GitHub Releases
+        if: "!startsWith(github.ref, 'refs/pull/')"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package_apk.outputs.version_tag }}
+          name: "PSP Localization Studio ${{ steps.package_apk.outputs.version_tag }}"
+          body: |
+            ## 🎮 PSP Localization Studio (${{ steps.package_apk.outputs.version_tag }})
+            Bản build APK tự động từ commit `${{ github.sha }}`.
+
+            ### 📦 Tải xuống:
+            - Tải trực tiếp file **`${{ steps.package_apk.outputs.apk_name }}`** ở mục **Assets** bên dưới để cài đặt trên Android.
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.package_apk.outputs.apk_name }}
+            ${{ steps.package_apk.outputs.sha_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
