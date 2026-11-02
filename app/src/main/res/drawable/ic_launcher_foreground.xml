@@ -2,19 +2,12 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="24"
-    android:viewportHeight="24">
-    <group
-        android:scaleX="0.52"
-        android:scaleY="0.52"
-        android:translateX="5.76"
-        android:translateY="5.76">
-        <!-- Bold disc / translation glyph silhouette -->
-        <path
-            android:fillColor="#00F5D4"
-            android:pathData="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM12,14.5c-1.38,0 -2.5,-1.12 -2.5,-2.5s1.12,-2.5 2.5,-2.5 2.5,1.12 2.5,2.5 -1.12,2.5 -2.5,2.5zM12,4c4.41,0 8,3.59 8,8h-2c0,-3.31 -2.69,-6 -6,-6V4z"/>
-        <path
-            android:fillColor="#FFB703"
-            android:pathData="M4,12h2c0,3.31 2.69,6 6,6v2c-4.41,0 -8,-3.59 -8,-8z"/>
-    </group>
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00F5D4"
+        android:pathData="M54,24C37.43,24 24,37.43 24,54s13.43,30 30,30 30,-13.43 30,-30S70.57,24 54,24zM54,61.5c-4.14,0 -7.5,-3.36 -7.5,-7.5s3.36,-7.5 7.5,-7.5 7.5,3.36 7.5,7.5 -3.36,7.5 -7.5,7.5z" />
+    <path
+        android:fillColor="#FFB703"
+        android:pathData="M30,54h6c0,9.94 8.06,18 18,18v6c-13.25,0 -24,-10.75 -24,-24z" />
 </vector>

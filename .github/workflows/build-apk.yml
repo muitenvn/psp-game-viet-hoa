@@ -28,7 +28,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: 3. Configure Android SDK & Accept Licenses (No legacy 'tools' package)
+      - name: 3. Configure Android SDK & Accept Licenses
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="${ANDROID_HOME}"
@@ -50,7 +50,7 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: 5. Prepare .env and Debug Keystore
+      - name: 5. Prepare .env and Deterministic Debug Keystore
         run: |
           if [ ! -f .env ]; then
             if [ -f .env.example ]; then
@@ -63,12 +63,9 @@ jobs:
             if [ -f debug.keystore.base64 ]; then
               base64 -d debug.keystore.base64 > debug.keystore
             else
-              keytool -genkeypair -v \
-                -keystore debug.keystore \
-                -alias androiddebugkey \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -storepass android -keypass android \
-                -dname "CN=Android Debug,O=Android,C=US"
+              cat << 'EOF' | base64 -d > debug.keystore
+          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
+          EOF
             fi
           fi
 
@@ -109,8 +106,8 @@ jobs:
             ## 🎮 PSP Localization Studio (${{ steps.package_apk.outputs.version_tag }})
             Bản build APK tự động từ commit `${{ github.sha }}`.
 
-            ### 📦 Tải xuống:
-            - Tải trực tiếp file **`${{ steps.package_apk.outputs.apk_name }}`** ở mục **Assets** bên dưới để cài đặt trên Android.
+            ### ⚠️ Lưu ý khi cài đặt đè lên bản v1.0.2 cũ:
+            - Nếu trước đó bạn đã cài bản `v1.0.2` (bản bị ẩn icon và dùng khóa ký ngẫu nhiên), hãy vào **Cài đặt (Settings) -> Ứng dụng (Apps) -> PSP Localization Studio -> Gỡ cài đặt (Uninstall)** trước khi cài bản mới này.
           draft: false
           prerelease: false
           files: |
